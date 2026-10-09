@@ -5,6 +5,7 @@ package steam
 import (
 	"bufio"
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -239,6 +240,51 @@ func RemoveManagedMods(workshopPath string) (int, error) {
 
 // --- SteamCMD operations ---
 
+// ErrLoginRequired is returned (wrapped) when steamcmd fails because it has no
+// valid cached credentials for the login. Fix it with LoginCmd.
+var ErrLoginRequired = errors.New("steamcmd login required")
+
+// loginFailureMarkers are lowercase fragments of steamcmd output that mean the
+// login itself failed or needs interactive input (password, Steam Guard).
+var loginFailureMarkers = []string{
+	"cached credentials not found",
+	"invalid password",
+	"failed login",
+	"login failure",
+	"steam guard",
+	"two-factor",
+	"account logon denied",
+	"password:",
+}
+
+// IsLoginFailure reports whether steamcmd output indicates a login or
+// credential problem. The match is case-insensitive.
+func IsLoginFailure(out []byte) bool {
+	s := strings.ToLower(string(out))
+	for _, marker := range loginFailureMarkers {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// LoginCmd builds an interactive `steamcmd +login <name> +quit`. Stdio is left
+// unset so tea.ExecProcess can attach it to the terminal for the password and
+// Steam Guard prompts; steamcmd then caches the credentials.
+func LoginCmd(steamcmdPath, steamLogin string) *exec.Cmd {
+	return exec.Command(steamcmdPath, "+login", steamLogin, "+quit")
+}
+
+// runError wraps a failed steamcmd run, tagging login failures with
+// ErrLoginRequired. The full output is classified; only the tail is kept.
+func runError(what string, err error, out []byte) error {
+	if IsLoginFailure(out) {
+		return fmt.Errorf("steamcmd %s: %w: %s", what, ErrLoginRequired, lastLines(out, 3))
+	}
+	return fmt.Errorf("steamcmd %s: %w: %s", what, err, lastLines(out, 3))
+}
+
 // DownloadMod downloads/validates a workshop mod via steamcmd.
 // Output is captured (not streamed) so it cannot corrupt the TUI.
 func DownloadMod(steamcmdPath, steamLogin, modID string) error {
@@ -249,8 +295,7 @@ func DownloadMod(steamcmdPath, steamLogin, modID string) error {
 		"+quit",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("steamcmd download mod %s: %w: %s",
-			modID, err, lastLines(out, 3))
+		return runError("download mod "+modID, err, out)
 	}
 	return nil
 }
@@ -264,7 +309,7 @@ func UpdateGame(steamcmdPath, steamLogin string) error {
 		"+quit",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("steamcmd update game: %w: %s", err, lastLines(out, 3))
+		return runError("update game", err, out)
 	}
 	return nil
 }

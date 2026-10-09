@@ -31,6 +31,9 @@ type modsInstalledMsg struct {
 	err  error
 }
 
+// steamLoginDoneMsg is sent when the interactive steamcmd login exits.
+type steamLoginDoneMsg struct{ err error }
+
 // countryResultMsg carries the geo-lookup result for a server IP.
 type countryResultMsg struct {
 	ip      string

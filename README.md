@@ -13,7 +13,8 @@ with most external-tool dependencies replaced by native Go.
   current player counts, not just the API snapshot.
 - **Direct connect** by IP and port, with a password prompt for protected servers.
 - **Mod handling**: detects mods a server needs that you don't have, and either
-  installs them via SteamCMD or opens the Workshop pages for manual subscription.
+  installs them via SteamCMD or opens the Workshop pages for manual subscription. If SteamCMD has no cached credentials, press `l` on
+  the missing-mods page (or accept the prompt in setup) to log in interactively.
 - **Offline mode**: install/update and launch
   [DayZCommunityOfflineMode](https://github.com/Arkensor/DayZCommunityOfflineMode).
 - **Launch options** editor, installed-mods view, DayZ news, and desktop-shortcut
@@ -23,7 +24,9 @@ with most external-tool dependencies replaced by native Go.
 
 - Linux with a recent Go toolchain (see `go.mod`).
 - The Steam client (`steam`) — required to launch the game.
-- `steamcmd` — optional, for automatic mod install/update.
+- `steamcmd` — optional, for automatic mod install/update. It needs a one-time interactive login
+  (password / Steam Guard), which dzman can run for you. dzman finds `steamcmd` or `steamcmd.sh` on `PATH`
+  or in the usual install folders (`~/steamcmd`, `~/.steam/steamcmd`, `/usr/games`).
 - `xdg-open` — optional, to open Workshop pages in a browser.
 
 ## Install
