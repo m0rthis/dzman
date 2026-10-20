@@ -52,6 +52,7 @@ func main() {
 			"Run: echo 'vm.max_map_count=1048576' | sudo tee /etc/sysctl.d/50-dzman.conf && sudo sysctl -p")
 	}
 
+	tui.SetTheme(cfg.Theme)
 	m := tui.New(cfg, profile, paths)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {

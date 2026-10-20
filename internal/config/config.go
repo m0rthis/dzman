@@ -80,6 +80,8 @@ type Config struct {
 	FilterPlayersSlots int `json:"filter_players_slots"`
 	// HistorySize is the maximum number of history entries kept.
 	HistorySize int `json:"history_size"`
+	// Theme is the TUI accent colour: "purple", "blue", "orange" or a "#RRGGBB" hex.
+	Theme string `json:"theme"`
 
 	// Runtime paths — not persisted.
 	Dir              string `json:"-"`
@@ -103,6 +105,7 @@ func defaults() *Config {
 		FilterPlayersLimit: 50,
 		FilterPlayersSlots: 60,
 		HistorySize:        10,
+		Theme:              "blue",
 	}
 }
 

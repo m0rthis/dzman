@@ -58,7 +58,7 @@ State lives under `~/.config/dzman/`:
 
 | File | Purpose |
 | --- | --- |
-| `dzman.json` | app settings (API URL, cache TTLs, SteamCMD, filter defaults) |
+| `dzman.json` | app settings (API URL, cache TTLs, SteamCMD, filter defaults, `theme`) |
 | `profile.json` | player name, Steam login, favorites, history, launch options |
 | `servers.json` | cached server list (refreshed per `server_db_ttl`) |
 | `news.json` | cached DayZ news |
@@ -66,6 +66,9 @@ State lives under `~/.config/dzman/`:
 On first run a short setup wizard collects your player name and (optionally)
 SteamCMD login. DayZ also needs `vm.max_map_count` ≥ 1048576; dzman warns and
 offers to set it.
+
+Set `"theme"` in `dzman.json` to `blue` (default), `purple`, `orange`, or any
+`#RRGGBB` hex to change the accent colour.
 
 ## Development
 

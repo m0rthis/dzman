@@ -2,13 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
 // Palette.
 var (
-	colAccent = lipgloss.Color("#FF4500") // DayZ orange
+	colAccent = lipgloss.Color("#3B82F6") // set by SetTheme
 	colDim    = lipgloss.Color("#555555")
 	colGreen  = lipgloss.Color("#22C55E")
 	colRed    = lipgloss.Color("#EF4444")
@@ -57,6 +58,28 @@ var (
 	checkboxOn  = greenStyle.Render("[x]")
 	checkboxOff = dimStyle.Render("[ ]")
 )
+
+// themes maps theme names to accent colours.
+var themes = map[string]lipgloss.Color{
+	"purple": "#8B5CF6",
+	"blue":   "#3B82F6",
+	"orange": "#FF4500", // original DayZ orange
+}
+
+// SetTheme sets the accent colour from a theme name or "#RRGGBB" hex.
+// Unknown values fall back to blue. Call before New.
+func SetTheme(theme string) {
+	c, ok := themes[strings.ToLower(theme)]
+	if !ok && len(theme) == 7 && theme[0] == '#' {
+		c, ok = lipgloss.Color(theme), true
+	}
+	if !ok {
+		c = themes["blue"]
+	}
+	colAccent = c
+	titleStyle = titleStyle.Foreground(c)
+	headerStyle = headerStyle.BorderForeground(c).Foreground(c)
+}
 
 // boolIcon returns a coloured check or cross.
 func boolIcon(b bool) string {
