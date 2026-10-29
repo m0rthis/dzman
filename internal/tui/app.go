@@ -4,7 +4,6 @@ package tui
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -27,29 +26,30 @@ import (
 type page int
 
 const (
-	pageLoading      page = iota // fetching servers/news on startup
-	pageSetup                    // first-run wizard
-	pageMain                     // main menu
-	pageBrowser                  // server list (all / filtered / favorites / history)
-	pageServerAction             // post-select action (Play / Favorite / Desktop…)
-	pageFilterMenu               // multi-select filter list
-	pageFilterInput              // text input for map/mod filter value
-	pageDirectConnect            // IP + Port form
-	pageNews                     // scrollable news view
-	pageConfig                   // config submenu
-	pageLaunchOpts               // launch-options toggle list
-	pageModInfo                  // installed mods list
-	pageOfflineMission           // mission picker for offline play
-	pageMissingMods              // server needs mods that are not installed
-	pagePassword                 // password prompt for protected servers
-	pageError                    // fatal / display error
+	pageLoading        page = iota // fetching servers/news on startup
+	pageSetup                      // first-run wizard
+	pageMain                       // main menu
+	pageBrowser                    // server list (all / filtered / favorites / history)
+	pageServerAction               // post-select action (Play / Favorite / Desktop…)
+	pageFilterMenu                 // multi-select filter list
+	pageFilterInput                // text input for map/mod filter value
+	pageDirectConnect              // IP + Port form
+	pageNews                       // scrollable news view
+	pageConfig                     // config submenu
+	pageLaunchOpts                 // launch-options toggle list
+	pageModInfo                    // installed mods list
+	pageOfflineMission             // mission picker for offline play
+	pageMissingMods                // server needs mods that are not installed
+	pageModDownload                // Steamworks download progress
+	pagePassword                   // password prompt for protected servers
+	pageError                      // fatal / display error
 )
 
 // browserKind tracks what kind of data the browser is showing.
 type browserKind int
 
 const (
-	browserAll      browserKind = iota
+	browserAll browserKind = iota
 	browserFiltered
 	browserFavorites
 	browserHistory
@@ -59,12 +59,13 @@ const (
 type setupStep int
 
 const (
-	setupWelcome     setupStep = iota // display welcome, ask SteamCMD
-	setupLogin                        // ask steam login (if SteamCMD)
-	setupLoginNow                     // offer an interactive SteamCMD login
-	setupPlayer                       // ask player name
-	setupSteamDir                     // ask steam root if not found
-	setupSteamCMDPath                 // ask steamcmd binary path
+	setupWelcome      setupStep = iota // display welcome, ask SteamCMD
+	setupLogin                         // ask steam login (if SteamCMD)
+	setupLoginNow                      // offer an interactive SteamCMD login
+	setupPlayer                        // ask player name
+	setupSteamDir                      // ask steam root if not found
+	setupSteamCMDPath                  // ask steamcmd binary path
+	setupSteamAPIPath                  // ask libsteam_api.so path
 )
 
 // Model is the root bubbletea model for the entire application.
@@ -110,8 +111,26 @@ type Model struct {
 
 	// Pending launch state (missing-mods / password pages).
 	missingMods []api.Mod
-	pendingIP   string // direct-connect target not in the server list
-	pendingPort int
+	missingNote string // the status line buildMissingModsNote showed
+	// swFailed is set once a Steamworks attempt failed for missingMods, so
+	// the page offers the steamcmd / manual fallback.
+	swFailed bool
+	// swallowC: c is ignored on the missing-mods page until then.
+	swallowC time.Time
+
+	// Mod backend, refreshed by refreshBackend.
+	bk         backendInputs
+	lib        libLookup // cached libsteam_api.so lookup
+	libGen     int       // bumped to force a fresh lookup (see relookLibrary)
+	backend    backendKind
+	backendWhy string // why auto skipped Steamworks, "" if it did not
+	// dl is the running or last Steamworks download.
+	dl *dlState
+	// resultToServer sends esc on the next text result page back to the
+	// selected server's options (set by Update Server Mods, cleared on use).
+	resultToServer bool
+	pendingIP      string // direct-connect target not in the server list
+	pendingPort    int
 
 	// Setup wizard.
 	step      setupStep
@@ -161,6 +180,7 @@ func New(cfg *config.Config, profile *config.Profile, paths *steam.Paths) Model 
 		countryCache: map[string]string{},
 		loading:      true,
 		loadingMsg:   "Fetching server list…",
+		lib:          libLookup{pending: true}, // Init looks it up in the background
 	}
 }
 
@@ -171,6 +191,7 @@ func (m Model) Init() tea.Cmd {
 		m.fetchServersCmd(false),
 		m.fetchNewsCmd(false),
 		m.scanModsCmd(),
+		m.findLibraryCmd(),
 	)
 }
 
@@ -219,7 +240,7 @@ func (m Model) scanModsCmd() tea.Cmd {
 		if paths == nil {
 			return modsScannedMsg{}
 		}
-		mods, err := steam.ScanMods(paths.Workshop)
+		mods, err := steam.ScanAllMods(paths)
 		return modsScannedMsg{mods: mods, err: err}
 	}
 }
@@ -229,7 +250,7 @@ func updateModsCmd(paths *steam.Paths) tea.Cmd {
 		if paths == nil {
 			return modsScannedMsg{}
 		}
-		mods, err := steam.ScanMods(paths.Workshop)
+		mods, err := steam.ScanAllMods(paths)
 		return modsScannedMsg{mods: mods, err: err}
 	}
 }
@@ -262,21 +283,24 @@ func launchDayZCmd(playerName string, steamArgs []string) tea.Cmd {
 	}
 }
 
-func steamCMDUpdateCmd(steamcmdPath, login string, mods []steam.InstalledMod) tea.Cmd {
+// steamCMDUpdateCmd re-downloads the dzman-managed steamcmd mods into
+// contentDir. Mods with a malformed ID are skipped and reported. The game
+// itself is left to the Steam client.
+func steamCMDUpdateCmd(steamcmdPath, login, contentDir string, mods []steam.InstalledMod) tea.Cmd {
 	return func() tea.Msg {
-		path, err := steam.FindSteamCMD(steamcmdPath)
-		if err != nil {
-			return errMsg{err: err}
-		}
-		if err := steam.UpdateGame(path, login); err != nil {
-			return errMsg{err: loginHint(err)}
-		}
+		var bad []string
+		n := 0
 		for _, mod := range mods {
-			if err := steam.DownloadMod(path, login, mod.ID); err != nil {
-				return errMsg{err: loginHint(err)}
+			if !steam.ValidModID(mod.ID) {
+				bad = append(bad, fmt.Sprintf("%s: invalid workshop ID %q", mod.Name, mod.ID))
+				continue
 			}
+			if err := steam.DownloadMod(steamcmdPath, login, contentDir, mod.ID); err != nil {
+				return steamCMDUpdatedMsg{n: n, bad: bad, err: loginHint(err)}
+			}
+			n++
 		}
-		return modsScannedMsg{} // trigger re-scan
+		return steamCMDUpdatedMsg{n: n, bad: bad}
 	}
 }
 
@@ -291,35 +315,48 @@ func loginHint(err error) error {
 
 // steamLoginCmd suspends the TUI and runs an interactive steamcmd login so
 // the user can type the password / Steam Guard code.
-func steamLoginCmd(steamcmdPath, login string) tea.Cmd {
-	path, err := steam.FindSteamCMD(steamcmdPath)
+func (m Model) steamLoginCmd() tea.Cmd {
+	path, err := m.resolveSteamCMD()
 	if err != nil {
-		return func() tea.Msg {
-			return steamLoginDoneMsg{err: err}
-		}
+		return func() tea.Msg { return steamLoginDoneMsg{err: err} }
 	}
-	return tea.ExecProcess(steam.LoginCmd(path, login), func(err error) tea.Msg {
+	cmd, err := steam.LoginCmd(path, m.profile.SteamLogin)
+	if err != nil {
+		return func() tea.Msg { return steamLoginDoneMsg{err: err} }
+	}
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return steamLoginDoneMsg{err: err}
 	})
 }
 
-// installMissingModsCmd downloads mods via steamcmd, marks them as managed by
-// dzman, and returns a fresh workshop scan.
-func installMissingModsCmd(steamcmdPath, login, workshopPath string, mods []api.Mod) tea.Cmd {
+// installMissingModsCmd downloads mods via steamcmd into dzman's own dir
+// (DownloadMod marks them managed) and returns a fresh scan.
+// Mods with a malformed ID are not passed to steamcmd; they are reported.
+func installMissingModsCmd(steamcmdPath, login string, paths *steam.Paths, mods []api.Mod) tea.Cmd {
 	return func() tea.Msg {
-		path, err := steam.FindSteamCMD(steamcmdPath)
-		if err != nil {
-			return modsInstalledMsg{err: err}
-		}
+		var bad []string
+		seen := map[string]bool{}
 		for _, mod := range mods {
-			if err := steam.DownloadMod(path, login, mod.SteamWorkshopID); err != nil {
-				return modsInstalledMsg{err: err}
+			if seen[mod.SteamWorkshopID] {
+				continue // listed twice; one download is enough
 			}
-			_ = steam.MarkManaged(workshopPath, mod.SteamWorkshopID)
+			seen[mod.SteamWorkshopID] = true
+			if !steam.ValidModID(mod.SteamWorkshopID) {
+				bad = append(bad, invalidModLine(mod))
+				continue
+			}
+			if err := steam.DownloadMod(steamcmdPath, login, paths.CmdContent, mod.SteamWorkshopID); err != nil {
+				return modsInstalledMsg{bad: bad, err: err}
+			}
 		}
-		installed, err := steam.ScanMods(workshopPath)
-		return modsInstalledMsg{mods: installed, err: err}
+		installed, err := steam.ScanAllMods(paths)
+		return modsInstalledMsg{mods: installed, bad: bad, err: err}
 	}
+}
+
+// invalidModLine is the per-item report for a server mod with a bad ID.
+func invalidModLine(mod api.Mod) string {
+	return fmt.Sprintf("%s: invalid workshop ID %q", mod.Name, mod.SteamWorkshopID)
 }
 
 // openWorkshopCmd opens each mod's Steam Workshop page in the browser.
@@ -374,8 +411,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modsScannedMsg:
 		m.mods = msg.mods
+		if m.pg == pageConfig {
+			return m.rebuildConfigMenu() // e.g. after Remove Managed Mods
+		}
+		if m.pg != pageLoading || m.loadedMods {
+			// A background rescan. A pageLoading that is not waiting on the
+			// mod scan (installing, launching…) is not ours to end.
+			return m, nil
+		}
 		m.loadedMods = true
 		return m.maybeFinishLoading()
+
+	case libFoundMsg:
+		if msg.key != m.libKey() {
+			if m.lib.pending {
+				// The inputs changed while the startup lookup ran.
+				return m, m.findLibraryCmd()
+			}
+			return m, nil
+		}
+		m.lib = libLookup(msg)
+		m.lib.pending = false
+		cmd := m.refreshBackend()
+		switch m.pg {
+		case pageConfig:
+			next, cmd2 := m.rebuildConfigMenu()
+			return next, tea.Batch(cmd, cmd2)
+		case pageMissingMods:
+			// The backend may have been undecided until now.
+			next, cmd2 := m.buildMissingModsNote(m.missingMods, m.missingNote)
+			return next, tea.Batch(cmd, cmd2)
+		}
+		return m, cmd
 
 	case countryResultMsg:
 		m.countryCache[msg.ip] = msg.country
@@ -415,13 +482,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.buildMainList()
 		}
 		if missing := m.missingServerMods(m.sel); len(missing) > 0 {
-			return m.buildMissingModsNote(missing, redStyle.Render(fmt.Sprintf(
-				"%d mods still missing after install. SteamCMD may need a login: press l.", len(missing))))
+			note := fmt.Sprintf("%d mods still missing after install.", len(missing))
+			if len(msg.bad) < len(missing) {
+				note += " SteamCMD may need a login: press l."
+			}
+			if len(msg.bad) > 0 {
+				note += "\n" + strings.Join(msg.bad, "\n")
+			}
+			return m.buildMissingModsNote(missing, redStyle.Render(note))
 		}
 		return m.promptPasswordOrLaunch(m.sel)
 
 	case steamLoginDoneMsg:
 		return m.finishSteamLogin(msg)
+
+	case swStartedMsg, swEventMsg, swGoneMsg, swExitMsg, swRescanMsg:
+		return m.updateSteamworks(msg)
+
+	case steamCMDUpdatedMsg:
+		body := greenStyle.Render(fmt.Sprintf("  Updated %d SteamCMD mods.", msg.n))
+		if msg.err != nil {
+			body = redStyle.Render("  " + msg.err.Error())
+		}
+		for _, b := range msg.bad {
+			body += "\n" + redStyle.Render("  "+b)
+		}
+		m, _ = m.showModResult("Update Mods", body)
+		return m, m.scanModsCmd()
 
 	case updateCheckMsg:
 		return m.showUpdateResult(msg)
@@ -466,10 +553,10 @@ func (m Model) maybeFinishLoading() (Model, tea.Cmd) {
 		m.pg = pageSetup
 		m.step = setupWelcome
 		items := newMenuItems(
-			"Yes — use SteamCMD (auto install/update mods)",
-			"No — subscribe to mods manually in Steam",
+			"Yes — also allow SteamCMD (needs its own Steam login)",
+			"No — use the running Steam client, or subscribe manually",
 		)
-		m.list = newList(items, "Use SteamCMD for mod management?", m.w, m.h-6)
+		m.list = newList(items, "dzman installs mods through your running Steam client. Allow SteamCMD as a fallback?", m.w, m.h-6)
 		return m, nil
 	}
 
@@ -544,6 +631,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.keyOfflineMission(msg)
 	case pageMissingMods:
 		return m.keyMissingMods(msg)
+	case pageModDownload:
+		return m.keyModDownload(msg)
 	case pagePassword:
 		return m.keyPassword(msg)
 	case pageError:
@@ -583,6 +672,8 @@ func (m Model) keySetup(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.keySetupInput(msg, m.advanceSetupSteamDir)
 	case setupSteamCMDPath:
 		return m.keySetupInput(msg, m.advanceSetupSteamCMDPath)
+	case setupSteamAPIPath:
+		return m.keySetupInput(msg, m.advanceSetupSteamAPIPath)
 	}
 	return m, nil
 }
@@ -627,6 +718,11 @@ func (m Model) keySetupInput(msg tea.KeyMsg, advance func() (Model, tea.Cmd)) (M
 	switch msg.String() {
 	case "enter":
 		return advance()
+	case "esc":
+		// The path prompts are only reached from Config; leave unsaved.
+		if m.step == setupSteamCMDPath || m.step == setupSteamAPIPath {
+			return m.buildConfigMenu()
+		}
 	case "ctrl+c":
 		return m, tea.Quit
 	}
@@ -640,6 +736,11 @@ func (m Model) advanceSetupLogin() (Model, tea.Cmd) {
 	if login == "" {
 		login = "anonymous"
 	}
+	if err := steam.ValidateSteamLogin(login); err != nil {
+		m.setupNote = err.Error()
+		return m, nil
+	}
+	m.setupNote = ""
 	m.profile.SteamLogin = login
 	if m.cfg.SteamCMDEnabled && login != "anonymous" {
 		m.step = setupLoginNow
@@ -671,7 +772,7 @@ func (m Model) keySetupLoginNow(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		if strings.Contains(i.label, "Yes") {
-			return m, steamLoginCmd(m.cfg.SteamCMDPath, m.profile.SteamLogin)
+			return m, m.steamLoginCmd()
 		}
 		return m.toPlayerStep(), nil
 	case "ctrl+c":
@@ -723,6 +824,15 @@ func (m Model) advanceSetupSteamCMDPath() (Model, tea.Cmd) {
 	}
 	m.cfg.SteamCMDPath = path
 	_ = m.cfg.Save()
+	return m.buildConfigMenu()
+}
+
+func (m Model) advanceSetupSteamAPIPath() (Model, tea.Cmd) {
+	m.cfg.SteamAPIPath = strings.TrimSpace(m.inputs[0].Value())
+	_ = m.cfg.Save()
+	// Look again even if the value is unchanged; buildConfigMenu starts
+	// the lookup in the background.
+	m.relookLibrary()
 	return m.buildConfigMenu()
 }
 
@@ -1217,7 +1327,7 @@ func (m Model) connectDirect(ip string, gamePort int) (Model, tea.Cmd) {
 func (m Model) buildServerAction(srv *api.Server, offlineName, ip string, port int) (Model, tea.Cmd) {
 	var labels []string
 	if srv != nil {
-		labels = append(labels, "Play")
+		labels = append(labels, "Play", "Update Server Mods")
 		if m.profile.IsFavorite(srv.Endpoint.IP, srv.Endpoint.Port) {
 			labels = append(labels, "Remove from Favorites")
 		} else {
@@ -1273,6 +1383,11 @@ func (m Model) handleServerActionSelect(label string) (Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.playServer(srv)
+	case "Update Server Mods":
+		if srv == nil {
+			return m, nil
+		}
+		return m.updateServerMods(srv)
 	case "Add to Favorites":
 		if srv != nil {
 			m.profile.AddFavorite(srv.Name, srv.Endpoint.IP, srv.Endpoint.Port)
@@ -1317,37 +1432,42 @@ func (m Model) playServer(srv *api.Server) (Model, tea.Cmd) {
 	return m.promptPasswordOrLaunch(srv)
 }
 
-// missingServerMods returns the server mods without a workshop directory.
+// missingServerMods returns the server mods found in neither mod dir.
 func (m Model) missingServerMods(srv *api.Server) []api.Mod {
-	if m.paths == nil {
+	if m.paths == nil || srv == nil {
 		return nil
 	}
 	var missing []api.Mod
 	for _, mod := range srv.Mods {
-		p := filepath.Join(m.paths.Workshop, mod.SteamWorkshopID)
-		if info, err := os.Stat(p); err != nil || !info.IsDir() {
+		if _, ok := m.paths.FindMod(mod.SteamWorkshopID); !ok {
 			missing = append(missing, mod)
 		}
 	}
 	return missing
 }
 
-// canInstallMods reports whether steamcmd installs are possible.
-func (m Model) canInstallMods() bool {
-	return m.cfg.SteamCMDEnabled &&
-		m.profile.SteamLogin != "" && m.profile.SteamLogin != "anonymous"
+// canSteamCMDInstall reports whether the steamcmd install (and login) keys
+// apply: steamcmd is the backend, or Steamworks failed and steamcmd is ready.
+func (m Model) canSteamCMDInstall() bool {
+	if m.backend == backendSteamCMD {
+		return m.bk.steamCMDReady()
+	}
+	return m.swFailed && m.cfg.SteamCMDEnabled && m.bk.steamCMDReady()
 }
 
 // buildMissingMods shows the list of mods that must be installed to play.
 func (m Model) buildMissingMods(missing []api.Mod) (Model, tea.Cmd) {
+	m.swFailed = false
 	return m.buildMissingModsNote(missing, "")
 }
 
 // buildMissingModsNote is buildMissingMods with a status line above the list.
 func (m Model) buildMissingModsNote(missing []api.Mod, note string) (Model, tea.Cmd) {
 	m.missingMods = missing
+	m.missingNote = note
 	m.pg = pageMissingMods
 	m.newsView = viewport.New(m.w-4, m.h-6)
+	cmd := m.refreshBackend()
 
 	var sb strings.Builder
 	if note != "" {
@@ -1356,38 +1476,71 @@ func (m Model) buildMissingModsNote(missing []api.Mod, note string) (Model, tea.
 	sb.WriteString(dimStyle.Render("The server runs mods you don't have installed:") + "\n\n")
 	for _, mod := range missing {
 		fmt.Fprintf(&sb, "  %s %s\n", redStyle.Render("✗"), mod.Name)
+		if !steam.ValidModID(mod.SteamWorkshopID) {
+			sb.WriteString(redStyle.Render(fmt.Sprintf("    invalid workshop ID %q from the server; cannot be installed", mod.SteamWorkshopID)) + "\n")
+			continue
+		}
 		sb.WriteString(dimStyle.Render("    "+mod.WorkshopURL()) + "\n")
 	}
-	sb.WriteString("\n")
-	if m.canInstallMods() {
-		sb.WriteString(dimStyle.Render("Press i to install them automatically with SteamCMD.\n"+
-			"Press l first to log in to SteamCMD if it has never logged in.") + "\n")
-	} else {
-		sb.WriteString(dimStyle.Render(
-			"SteamCMD is unavailable (disabled or anonymous login) — press o to open\n"+
-				"the Workshop pages and subscribe in Steam, then try again.") + "\n")
+	sb.WriteString("\n" + dimStyle.Render("Mod backend: "+m.backendLabel()) + "\n")
+	if m.backendWhy != "" {
+		sb.WriteString(dimStyle.Render(m.backendWhy) + "\n")
 	}
+	if m.backend == backendSteamworks {
+		// Shown so a stand-in copy (e.g. an emulator's) is easy to spot.
+		sb.WriteString(dimStyle.Render("libsteam_api.so: "+m.steamAPIStatus()) + "\n")
+	}
+	sb.WriteString("\n")
+	switch {
+	case m.backend == backendPending:
+		sb.WriteString(dimStyle.Render("Looking for the Steam API library (libsteam_api.so); "+
+			"installing is possible once that is done.") + "\n")
+	case m.backend == backendSteamworks && !m.swFailed:
+		sb.WriteString(dimStyle.Render("Press i to subscribe and download them with your running Steam client.\n"+
+			"Steam shows DayZ as running while it downloads.") + "\n")
+	case m.backend == backendSteamCMD:
+		if p := m.bk.steamCMDProblem(); p != "" {
+			sb.WriteString(redStyle.Render("SteamCMD: "+p) + "\n")
+		} else {
+			sb.WriteString(dimStyle.Render("Press i to install them with SteamCMD (into dzman's own folder).\n"+
+				"Press l first to log in to SteamCMD if it has never logged in.") + "\n")
+		}
+	}
+	if m.backend == backendSteamworks && m.swFailed {
+		sb.WriteString(dimStyle.Render("Press i to try Steam again.") + "\n")
+		if m.canSteamCMDInstall() {
+			sb.WriteString(dimStyle.Render("Press c to install them with SteamCMD instead.") + "\n")
+		}
+	}
+	sb.WriteString(dimStyle.Render("Press o to open the Workshop pages and subscribe in Steam yourself, then try again.") + "\n")
 	m.newsView.SetContent(sb.String())
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) keyMissingMods(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "i":
-		if !m.canInstallMods() {
+		switch m.backend {
+		case backendSteamworks:
+			ids, names := modNames(m.missingMods)
+			return m.startSteamworks(dlInstall, ids, names)
+		case backendSteamCMD:
+			return m.installWithSteamCMD()
+		}
+		return m, nil
+	case "c":
+		if time.Now().Before(m.swallowC) {
 			return m, nil
 		}
-		m.loading = true
-		m.loadingMsg = fmt.Sprintf("Installing %d mods with SteamCMD…", len(m.missingMods))
-		m.pg = pageLoading
-		return m, tea.Batch(m.spin.Tick, installMissingModsCmd(
-			m.cfg.SteamCMDPath, m.profile.SteamLogin, m.paths.Workshop, m.missingMods,
-		))
+		if m.backend == backendSteamworks && m.canSteamCMDInstall() {
+			return m.installWithSteamCMD()
+		}
+		return m, nil
 	case "l":
-		if !m.canInstallMods() {
+		if !m.canSteamCMDInstall() {
 			return m, nil
 		}
-		return m, steamLoginCmd(m.cfg.SteamCMDPath, m.profile.SteamLogin)
+		return m, m.steamLoginCmd()
 	case "o":
 		return m, openWorkshopCmd(m.missingMods)
 	case "esc", "q":
@@ -1399,6 +1552,19 @@ func (m Model) keyMissingMods(msg tea.KeyMsg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.newsView, cmd = m.newsView.Update(msg)
 	return m, cmd
+}
+
+// installWithSteamCMD runs the steamcmd install for the missing mods.
+func (m Model) installWithSteamCMD() (Model, tea.Cmd) {
+	if !m.bk.steamCMDReady() || m.paths == nil {
+		return m, nil
+	}
+	m.loading = true
+	m.loadingMsg = fmt.Sprintf("Installing %d mods with SteamCMD…", len(m.missingMods))
+	m.pg = pageLoading
+	return m, tea.Batch(m.spin.Tick, installMissingModsCmd(
+		m.bk.cmdPath, m.profile.SteamLogin, m.paths, m.missingMods,
+	))
 }
 
 // promptPasswordOrLaunch asks for the server password when needed.
@@ -1448,8 +1614,13 @@ func (m Model) doLaunch(srv *api.Server, password string) (Model, tea.Cmd) {
 	for i, mod := range srv.Mods {
 		modIDs[i] = mod.SteamWorkshopID
 	}
+	if bad := steam.InvalidModIDs(modIDs); len(bad) > 0 {
+		m.err = fmt.Errorf("invalid workshop IDs from the server: %q", bad)
+		m.pg = pageError
+		return m, nil
+	}
 	if m.paths != nil {
-		if err := steam.EnsureSymlinks(m.paths.DayZ, m.paths.Workshop, modIDs); err != nil {
+		if err := steam.EnsureSymlinks(m.paths.DayZ, m.paths.ModDirs(), modIDs); err != nil {
 			m.err = err
 			m.pg = pageError
 			return m, nil
@@ -1577,6 +1748,13 @@ func (m Model) buildNews() (Model, tea.Cmd) {
 func (m Model) keyNews(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
+		if m.resultToServer {
+			m.resultToServer = false
+			m.pg = pageServerAction
+			m, cmd := m.buildServerAction(m.sel, "", "", 0)
+			m.list.Select(1) // keep the cursor on Update Server Mods
+			return m, cmd
+		}
 		m.pg = pageMain
 		return m.buildMainList()
 	case "ctrl+c":
@@ -1620,28 +1798,78 @@ func (m Model) keyModInfo(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 func (m Model) buildConfigMenu() (Model, tea.Cmd) {
 	m.pg = pageConfig
-	labels := []string{"Launch Options", "Change Player Name", "Change Steam Root"}
+	cmd := m.refreshBackend()
+	labels := []string{"Launch Options", "Change Player Name", "Change Steam Root",
+		"Mod Backend", "Change Steam API Path"}
 	if m.cfg.SteamCMDEnabled {
 		labels = append(labels, "Change Steam Login", "Change SteamCMD Path", "Disable SteamCMD")
 	} else {
 		labels = append(labels, "Enable SteamCMD")
 	}
+	clientIDs, _ := m.clientMods()
+	managed := m.managedMods()
+	if len(managed) > 0 {
+		labels = append(labels, "Remove Managed Mods")
+	}
 	if len(m.mods) > 0 {
-		labels = append(labels, "Remove Managed Mods", "Remove All Mod Links")
-		if m.cfg.SteamCMDEnabled {
-			labels = append(labels, "Update Game & All Mods")
+		labels = append(labels, "Remove All Mod Links")
+	}
+	updateDesc := m.updateBlockedWhy()
+	if updateDesc == "" {
+		switch m.backend {
+		case backendSteamworks:
+			updateDesc = fmt.Sprintf("ask the Steam client to update %d workshop mods (unsubscribed ones are skipped)", len(clientIDs))
+		case backendSteamCMD:
+			updateDesc = fmt.Sprintf("re-download %d dzman SteamCMD mods", len(managed))
 		}
 	}
+	labels = append(labels, "Update Mods")
 	labels = append(labels, "Refresh Server List", "Check for Updates", "About", "Back")
 	items := newMenuItems(labels...)
 	for i, it := range items {
-		if mi := it.(menuItem); mi.label == "Change SteamCMD Path" {
+		mi := it.(menuItem)
+		switch mi.label {
+		case "Change SteamCMD Path":
 			mi.desc = "steamcmd: " + m.steamCMDStatus()
-			items[i] = mi
+		case "Mod Backend":
+			mi.desc = m.backendLabel() + "  (enter to change)"
+			if !m.cfg.SteamCMDEnabled {
+				mi.desc += "; enable SteamCMD to offer steamcmd"
+			}
+		case "Change Steam API Path":
+			mi.desc = "libsteam_api.so: " + m.steamAPIStatus()
+		case "Remove Managed Mods":
+			mi.desc = fmt.Sprintf("delete %d mods dzman downloaded with SteamCMD; Steam's own mods are kept", len(managed))
+		case "Update Mods":
+			mi.desc = updateDesc
 		}
+		items[i] = mi
 	}
 	m.list = newList(items, "Config", m.w, m.h-4)
-	return m, nil
+	return m, cmd
+}
+
+// rebuildConfigMenu rebuilds the config menu keeping the cursor on the same
+// entry, or at the same position if that entry is gone.
+func (m Model) rebuildConfigMenu() (Model, tea.Cmd) {
+	idx := m.list.Index()
+	label := ""
+	if it, ok := m.list.SelectedItem().(menuItem); ok {
+		label = it.label
+	}
+	m, cmd := m.buildConfigMenu()
+	items := m.list.Items()
+	for i, it := range items {
+		if mi, ok := it.(menuItem); ok && mi.label == label {
+			idx = i
+			break
+		}
+	}
+	if idx >= len(items) {
+		idx = len(items) - 1
+	}
+	m.list.Select(max(idx, 0))
+	return m, cmd
 }
 
 // steamCMDStatus describes the configured steamcmd path and what it resolves
@@ -1651,7 +1879,7 @@ func (m Model) steamCMDStatus() string {
 	if shown == "" {
 		shown = steam.DefaultSteamCMD
 	}
-	path, err := steam.FindSteamCMD(m.cfg.SteamCMDPath)
+	path, err := m.resolveSteamCMD()
 	if err != nil {
 		return shown + " (not found)"
 	}
@@ -1716,6 +1944,22 @@ func (m Model) handleConfigSelect(label string) (Model, tea.Cmd) {
 		m.pg = pageSetup
 		m.step = setupSteamCMDPath
 		return m, nil
+	case "Mod Backend":
+		m.cfg.ModBackend = nextBackend(m.cfg.Backend(), m.cfg.SteamCMDEnabled)
+		_ = m.cfg.Save()
+		sel := m.list.Index()
+		m, cmd := m.buildConfigMenu()
+		m.list.Select(sel)
+		return m, cmd
+	case "Change Steam API Path":
+		m.inputs[0] = textinput.New()
+		m.inputs[0].Placeholder = "empty = auto-detect"
+		m.inputs[0].Prompt = "libsteam_api.so path: "
+		m.inputs[0].SetValue(m.cfg.SteamAPIPath)
+		m.inputs[0].Focus()
+		m.pg = pageSetup
+		m.step = setupSteamAPIPath
+		return m, nil
 	case "Disable SteamCMD":
 		m.cfg.SteamCMDEnabled = false
 		_ = m.cfg.Save()
@@ -1726,8 +1970,7 @@ func (m Model) handleConfigSelect(label string) (Model, tea.Cmd) {
 		return m.buildConfigMenu()
 	case "Remove Managed Mods":
 		if m.paths != nil {
-			_, _ = steam.RemoveManagedMods(m.paths.Workshop)
-			m.loadedMods = false
+			_, _ = steam.RemoveManagedMods(m.paths)
 			return m, updateModsCmd(m.paths)
 		}
 	case "Remove All Mod Links":
@@ -1735,12 +1978,23 @@ func (m Model) handleConfigSelect(label string) (Model, tea.Cmd) {
 			_, _ = steam.RemoveSymlinks(m.paths.DayZ)
 		}
 		return m.buildConfigMenu()
-	case "Update Game & All Mods":
-		if m.paths != nil && m.cfg.SteamCMDEnabled {
+	case "Update Mods":
+		if why := m.updateBlockedWhy(); why != "" {
+			return m.showUpdateError(errors.New(why))
+		}
+		switch m.backend {
+		case backendSteamworks:
+			ids, names := m.clientMods()
+			return m.startSteamworks(dlUpdate, ids, names)
+		case backendSteamCMD:
+			if !m.bk.steamCMDReady() {
+				return m.showUpdateError(errors.New("SteamCMD: " + m.bk.steamCMDProblem()))
+			}
 			m.loading = true
-			m.loadingMsg = "Updating game and mods…"
+			m.loadingMsg = "Updating SteamCMD mods…"
 			m.pg = pageLoading
-			return m, steamCMDUpdateCmd(m.cfg.SteamCMDPath, m.profile.SteamLogin, m.mods)
+			return m, tea.Batch(m.spin.Tick, steamCMDUpdateCmd(m.bk.cmdPath, m.profile.SteamLogin,
+				m.paths.CmdContent, m.managedMods()))
 		}
 	case "Refresh Server List":
 		m.loading = true
@@ -1799,16 +2053,21 @@ func (m Model) buildAbout() (Model, tea.Cmd) {
 	if m.paths != nil {
 		sb.WriteString(dimStyle.Render("  DayZ:     "+m.paths.DayZ) + "\n")
 		sb.WriteString(dimStyle.Render("  Workshop: "+m.paths.Workshop) + "\n")
+		if m.paths.CmdWorkshop != "" {
+			sb.WriteString(dimStyle.Render("  SteamCMD: "+m.paths.CmdWorkshop) + "\n")
+		}
 	}
 	sb.WriteString("\n" + subtitleStyle.Render("Settings") + "\n")
 	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Player:     %s", m.profile.Player)) + "\n")
 	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Steam login: %s", m.profile.SteamLogin)) + "\n")
 	sb.WriteString(dimStyle.Render(fmt.Sprintf("  SteamCMD:   %v", m.cfg.SteamCMDEnabled)) + "\n")
+	cmd := m.refreshBackend()
+	sb.WriteString(dimStyle.Render("  Mod backend: "+m.backendLabel()) + "\n")
 	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Server TTL: %s", m.cfg.ServerDBTTL)) + "\n")
 	sb.WriteString(dimStyle.Render(fmt.Sprintf("  API:        %s", m.cfg.APIBaseURL)) + "\n")
 	sb.WriteString("\n" + dimStyle.Render("Thanks to dayzsalauncher.com for the API") + "\n")
 	m.newsView.SetContent(sb.String())
-	return m, nil
+	return m, cmd
 }
 
 // ---- Launch options --------------------------------------------------
@@ -1924,8 +2183,7 @@ func (m *Model) refreshDetail() {
 		for _, mod := range s.Mods {
 			icon := redStyle.Render("✗")
 			if m.paths != nil {
-				modPath := filepath.Join(m.paths.Workshop, mod.SteamWorkshopID)
-				if info, err := os.Stat(modPath); err == nil && info.IsDir() {
+				if _, ok := m.paths.FindMod(mod.SteamWorkshopID); ok {
 					icon = greenStyle.Render("✓")
 				}
 			}
@@ -1958,6 +2216,8 @@ func (m Model) View() string {
 		return m.viewNews()
 	case pageMissingMods:
 		return m.viewMissingMods()
+	case pageModDownload:
+		return m.viewModDownload()
 	case pagePassword:
 		return m.viewPassword()
 	case pageError:
@@ -1968,7 +2228,16 @@ func (m Model) View() string {
 
 func (m Model) viewMissingMods() string {
 	help := "o open Workshop pages  esc back"
-	if m.canInstallMods() {
+	switch {
+	case m.backend == backendPending:
+		help = pendingLabel + "  " + help
+	case m.backend == backendSteamworks && m.canSteamCMDInstall():
+		help = "i retry with Steam  c install via SteamCMD  l log in to SteamCMD  " + help
+	case m.backend == backendSteamworks && m.swFailed:
+		help = "i retry with Steam  " + help
+	case m.backend == backendSteamworks:
+		help = "i download with Steam  " + help
+	case m.canSteamCMDInstall():
 		help = "i install via SteamCMD  l log in to SteamCMD  " + help
 	}
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -2005,6 +2274,9 @@ func (m Model) viewSetup() string {
 		sb.WriteString(m.list.View())
 	case setupLogin:
 		sb.WriteString(subtitleStyle.Render("Steam Login") + "\n\n")
+		if m.setupNote != "" {
+			sb.WriteString(redStyle.Render(m.setupNote) + "\n\n")
+		}
 		sb.WriteString(m.inputs[0].View() + "\n\n")
 		sb.WriteString(helpStyle.Render("enter to confirm"))
 	case setupPlayer:
@@ -2024,7 +2296,14 @@ func (m Model) viewSetup() string {
 		sb.WriteString(dimStyle.Render("e.g. /usr/bin/steamcmd or ~/steamcmd/steamcmd.sh") + "\n")
 		sb.WriteString(dimStyle.Render("Currently: "+m.steamCMDStatus()) + "\n\n")
 		sb.WriteString(m.inputs[0].View() + "\n\n")
-		sb.WriteString(helpStyle.Render("enter to confirm, leave blank to auto-detect (steamcmd / steamcmd.sh)"))
+		sb.WriteString(helpStyle.Render("enter to confirm, leave blank to auto-detect (steamcmd / steamcmd.sh), esc to cancel"))
+	case setupSteamAPIPath:
+		sb.WriteString(subtitleStyle.Render("Steamworks Library") + "\n\n")
+		sb.WriteString(dimStyle.Render("A 64-bit Linux libsteam_api.so, e.g. from the Steamworks SDK's") + "\n")
+		sb.WriteString(dimStyle.Render("redistributable_bin/linux64/. Or copy it to "+m.cfg.Dir+"/.") + "\n")
+		sb.WriteString(dimStyle.Render("Currently: "+m.steamAPIStatus()) + "\n\n")
+		sb.WriteString(m.inputs[0].View() + "\n\n")
+		sb.WriteString(helpStyle.Render("enter to confirm, leave blank to auto-detect, esc to cancel"))
 	}
 	return sb.String()
 }

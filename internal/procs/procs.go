@@ -45,6 +45,23 @@ func ByCmdline(substrs ...string) []int {
 	})
 }
 
+// ByArgv returns the PIDs, other than this process, whose argv (from
+// /proc/<pid>/cmdline) satisfies match.
+func ByArgv(match func(argv []string) bool) []int {
+	self := os.Getpid()
+	return scan(func(pidDir string) bool {
+		pid, _ := strconv.Atoi(filepath.Base(pidDir))
+		if pid == self {
+			return false
+		}
+		data, err := os.ReadFile(filepath.Join(pidDir, "cmdline"))
+		if err != nil || len(data) == 0 {
+			return false
+		}
+		return match(strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00"))
+	})
+}
+
 // Signal sends sig to every pid and returns how many were signalled.
 func Signal(pids []int, sig syscall.Signal) int {
 	count := 0

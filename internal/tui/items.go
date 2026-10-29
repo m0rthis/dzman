@@ -51,9 +51,9 @@ type menuItem struct {
 	desc  string
 }
 
-func (m menuItem) FilterValue() string  { return m.label }
-func (m menuItem) Title() string        { return m.label }
-func (m menuItem) Description() string  { return m.desc }
+func (m menuItem) FilterValue() string { return m.label }
+func (m menuItem) Title() string       { return m.label }
+func (m menuItem) Description() string { return m.desc }
 
 func newMenuItems(labels ...string) []list.Item {
 	items := make([]list.Item, len(labels))
@@ -81,7 +81,13 @@ func (m modItem) Title() string {
 		managed,
 	)
 }
-func (m modItem) Description() string { return dimStyle.Render("ID: " + m.mod.ID) }
+func (m modItem) Description() string {
+	desc := "ID: " + m.mod.ID
+	if m.mod.MetaID != "" && m.mod.MetaID != m.mod.ID {
+		desc += " (meta.cpp says " + m.mod.MetaID + ")"
+	}
+	return dimStyle.Render(desc)
+}
 
 // ---- favoriteItem / historyItem — wrappers for fav/history lists ----
 

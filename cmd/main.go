@@ -8,12 +8,18 @@ import (
 	"github.com/braydencw1/dzman/internal/config"
 	"github.com/braydencw1/dzman/internal/launcher"
 	"github.com/braydencw1/dzman/internal/steam"
+	"github.com/braydencw1/dzman/internal/steamworks"
 	"github.com/braydencw1/dzman/internal/tui"
 	"github.com/braydencw1/dzman/internal/version"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
+	// Hidden: the short-lived Steamworks download helper the TUI re-execs.
+	if len(os.Args) > 1 && os.Args[1] == steamworks.HelperCommand {
+		os.Exit(steamworks.RunHelper(os.Args[2:]))
+	}
+
 	// Handle `dzman connect <ip> <port>` sub-command for desktop-entry shortcuts.
 	if len(os.Args) == 4 && os.Args[1] == "connect" {
 		directConnect(os.Args[2], os.Args[3])
@@ -55,7 +61,13 @@ func main() {
 	tui.SetTheme(cfg.Theme)
 	m := tui.New(cfg, profile, paths)
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	_, err = p.Run()
+	// Never leave a helper running: the Steam client would think DayZ is.
+	if steamworks.Active() {
+		fmt.Fprintln(os.Stderr, "stopping Steamworks helper…")
+	}
+	steamworks.CancelAll()
+	if err != nil {
 		fatalf("run: %v", err)
 	}
 }

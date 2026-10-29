@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/braydencw1/dzman/internal/procs"
+	"github.com/braydencw1/dzman/internal/steamworks"
 )
 
 const (
@@ -65,6 +66,11 @@ func (a ConnectArgs) ToSteamArgs() []string {
 func LaunchDayZ(playerName string, gameArgs []string) error {
 	if IsDayZRunning() {
 		return fmt.Errorf("DayZ is already running")
+	}
+	// While the helper has the Steam API open as DayZ, the client counts the
+	// game as running; launching now would fail or confuse cloud sync.
+	if steamworks.IsHelperRunning(procs.ByArgv) {
+		return fmt.Errorf("a Steamworks mod download is still running; wait for it to finish or cancel it")
 	}
 
 	steamArgs := append(

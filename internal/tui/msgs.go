@@ -25,10 +25,18 @@ type modsScannedMsg struct {
 }
 
 // modsInstalledMsg carries the result of installing missing mods via steamcmd,
-// including a fresh workshop scan.
+// including a fresh scan of both mod dirs.
 type modsInstalledMsg struct {
 	mods []steam.InstalledMod
+	bad  []string // per-item reports for mods with a malformed ID
 	err  error
+}
+
+// steamCMDUpdatedMsg is sent when Update Mods via steamcmd finishes.
+type steamCMDUpdatedMsg struct {
+	n   int
+	bad []string // per-item reports for mods with a malformed ID
+	err error
 }
 
 // steamLoginDoneMsg is sent when the interactive steamcmd login exits.

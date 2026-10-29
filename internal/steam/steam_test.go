@@ -50,12 +50,332 @@ func TestRunError(t *testing.T) {
 }
 
 func TestLoginCmd(t *testing.T) {
-	cmd := LoginCmd("steamcmd", "bob")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cmd, err := LoginCmd("steamcmd", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := strings.Join(cmd.Args, " "); got != "steamcmd +login bob +quit" {
 		t.Errorf("args = %q", got)
 	}
 	if cmd.Stdin != nil || cmd.Stdout != nil || cmd.Stderr != nil {
 		t.Error("stdio must be left for ExecProcess")
+	}
+	home, _ := SteamCMDHomeDir()
+	if got := lastHome(cmd.Env); got != home {
+		t.Errorf("HOME = %q, want %q", got, home)
+	}
+	if fi, err := os.Stat(home); err != nil || !fi.IsDir() {
+		t.Errorf("steamcmd home not created: %v", err)
+	}
+}
+
+// lastHome returns the HOME value exec would use (the last one wins).
+func lastHome(vars []string) string {
+	home := ""
+	for _, kv := range vars {
+		if v, ok := strings.CutPrefix(kv, "HOME="); ok {
+			home = v
+		}
+	}
+	return home
+}
+
+func TestIsolatedEnvReplacesHome(t *testing.T) {
+	got := isolatedEnv([]string{"PATH=/bin", "HOME=/home/me", "HOMEX=keep", "XDG_CONFIG_HOME=/home/me/.config", "XDG_RUNTIME_DIR=/run/user/1"}, "/iso")
+	want := "PATH=/bin HOMEX=keep XDG_RUNTIME_DIR=/run/user/1 HOME=/iso XDG_DATA_HOME=/iso/.local/share " +
+		"XDG_CONFIG_HOME=/iso/.config XDG_CACHE_HOME=/iso/.cache XDG_STATE_HOME=/iso/.local/state"
+	if strings.Join(got, " ") != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestDownloadArgsOrder(t *testing.T) {
+	args := downloadArgs("/c", "bob", "42")
+	idx := func(s string) int {
+		for i, a := range args {
+			if a == s {
+				return i
+			}
+		}
+		return -1
+	}
+	fi, li, wi := idx("+force_install_dir"), idx("+login"), idx("+workshop_download_item")
+	if fi < 0 || li < 0 || wi < 0 || fi >= li || li >= wi {
+		t.Fatalf("bad order: %q", args)
+	}
+	if args[fi+1] != "/c" || args[wi+1] != GameID || args[wi+2] != "42" {
+		t.Errorf("bad args: %q", args)
+	}
+	if args[len(args)-1] != "+quit" {
+		t.Errorf("must end with +quit: %q", args)
+	}
+}
+
+func TestCheckSteamCMDIsolated(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "Steam")
+	if err := os.MkdirAll(filepath.Join(root, "steamcmd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// ~/.steam/steam style symlink to the real root.
+	link := filepath.Join(base, "steamlink")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, bin, root string
+		wantErr         bool
+	}{
+		{"inside root", filepath.Join(root, "steamcmd", "steamcmd.sh"), root, true},
+		{"inside via symlinked root", filepath.Join(root, "steamcmd.sh"), link, true},
+		{"sibling with shared prefix", filepath.Join(base, "SteamCMD", "steamcmd.sh"), root, false},
+		{"elsewhere", "/usr/games/steamcmd", root, false},
+		{"no root known", filepath.Join(root, "steamcmd.sh"), "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckSteamCMDIsolated(tt.bin, tt.root)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCheckSteamCMDIsolatedAnyRoot(t *testing.T) {
+	home := t.TempDir()
+	// ~/.steam/root links to the real root; the detected library is elsewhere.
+	real := filepath.Join(home, ".local", "share", "Steam")
+	if err := os.MkdirAll(filepath.Join(home, ".steam"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(home, ".steam", "root")); err != nil {
+		t.Fatal(err)
+	}
+	library := filepath.Join(home, "games", "SteamLibrary")
+	roots := clientRoots(home, library, "")
+	for _, bin := range []string{
+		filepath.Join(real, "steamcmd", "steamcmd.sh"),
+		filepath.Join(home, ".steam", "root", "steamcmd.sh"),
+		filepath.Join(home, FlatpakSteamRoot, "steamcmd", "steamcmd.sh"),
+		filepath.Join(library, "steamcmd.sh"),
+	} {
+		if err := CheckSteamCMDIsolated(bin, roots...); err == nil {
+			t.Errorf("%s accepted", bin)
+		}
+	}
+	if err := CheckSteamCMDIsolated(filepath.Join(home, "steamcmd", "steamcmd.sh"), roots...); err != nil {
+		t.Errorf("~/steamcmd rejected: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, r := range roots {
+		if r == "" || seen[r] {
+			t.Errorf("roots %q has empty or duplicate entries", roots)
+		}
+		seen[r] = true
+	}
+}
+
+func TestSteamCMDContentDir(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, ".local", "share", "dzman")
+	flatpak := filepath.Join(home, FlatpakSteamRoot)
+	if err := os.MkdirAll(flatpak, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink into the Flatpak tree counts as Flatpak Steam.
+	link := filepath.Join(home, "flatpak-steam")
+	if err := os.Symlink(flatpak, link); err != nil {
+		t.Fatal(err)
+	}
+	inFlatpak := filepath.Join(home, ".var", "app", "com.valvesoftware.Steam", "data", "dzman", "steamcmd-content")
+	tests := []struct {
+		name, root, want string
+	}{
+		{"native", filepath.Join(home, ".local", "share", "Steam"), filepath.Join(data, "steamcmd-content")},
+		{"unknown root", "", filepath.Join(data, "steamcmd-content")},
+		{"flatpak", flatpak, inFlatpak},
+		{"flatpak via symlink", link, inFlatpak},
+		{"other flatpak app", filepath.Join(home, ".var", "app", "com.valvesoftware.SteamLink"), filepath.Join(data, "steamcmd-content")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := steamCMDContentDir(home, data, isFlatpakClient(home, tt.root))
+			if got != tt.want {
+				t.Errorf("got %s, want %s", got, tt.want)
+			}
+			// Never inside the client's own steamapps.
+			if tt.root != "" && isWithin(got, filepath.Join(tt.root, "steamapps")) {
+				t.Errorf("%s is inside the client's steamapps", got)
+			}
+		})
+	}
+}
+
+func TestValidModID(t *testing.T) {
+	for id, want := range map[string]bool{
+		"1559212036": true, "1": true, "18446744073709551615": true,
+		"": false, "0": false, "-1": false, "1.5": false, "1e5": false, "+5": false,
+		" 1": false, "../x": false, "18446744073709551616": false,
+		"0123": false, "00": false, "10": true,
+	} {
+		if got := ValidModID(id); got != want {
+			t.Errorf("ValidModID(%q) = %v, want %v", id, got, want)
+		}
+	}
+}
+
+// makeMod creates <dir>/<id>/meta.cpp, optionally with a .dzman marker.
+func makeMod(t *testing.T, dir, id, name string, marked bool) {
+	t.Helper()
+	p := filepath.Join(dir, id)
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := "name = \"" + name + "\";\npublishedid = " + id + ";\ntimestamp = 1;\n"
+	if err := os.WriteFile(filepath.Join(p, "meta.cpp"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if marked {
+		if err := os.WriteFile(filepath.Join(p, ".dzman"), []byte(id), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func testPaths(t *testing.T) *Paths {
+	t.Helper()
+	base := t.TempDir()
+	return &Paths{
+		SteamApps:   filepath.Join(base, "Steam", "steamapps"),
+		DayZ:        filepath.Join(base, "Steam", "steamapps", "common", "DayZ"),
+		Workshop:    WorkshopDir(filepath.Join(base, "Steam")),
+		CmdWorkshop: WorkshopDir(filepath.Join(base, "dzman", "steamcmd-content")),
+	}
+}
+
+func TestScanAllModsAndFind(t *testing.T) {
+	p := testPaths(t)
+	makeMod(t, p.Workshop, "1", "Client", true) // stale marker from old dzman
+	makeMod(t, p.CmdWorkshop, "1", "Dup", true)
+	makeMod(t, p.CmdWorkshop, "2", "Cmd", true)
+	makeMod(t, p.CmdWorkshop, "3", "CmdUnmarked", false)
+
+	mods, err := ScanAllMods(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]InstalledMod{}
+	for _, m := range mods {
+		got[m.ID] = m
+	}
+	if len(mods) != 3 {
+		t.Fatalf("got %d mods, want 3: %+v", len(mods), mods)
+	}
+	if m := got["1"]; m.Name != "Client" || m.Managed {
+		t.Errorf("mod 1 = %+v, want client copy, unmanaged", m)
+	}
+	if !got["2"].Managed || got["3"].Managed {
+		t.Errorf("managed flags wrong: %+v", got)
+	}
+
+	if d, ok := p.FindMod("1"); !ok || d != filepath.Join(p.Workshop, "1") {
+		t.Errorf("FindMod(1) = %q %v", d, ok)
+	}
+	if d, ok := p.FindMod("2"); !ok || d != filepath.Join(p.CmdWorkshop, "2") {
+		t.Errorf("FindMod(2) = %q %v", d, ok)
+	}
+	if _, ok := p.FindMod("9"); ok {
+		t.Error("FindMod(9) should miss")
+	}
+}
+
+func TestRemoveManagedModsOnlyCmdDir(t *testing.T) {
+	p := testPaths(t)
+	makeMod(t, p.Workshop, "1", "Client", true)
+	makeMod(t, p.CmdWorkshop, "2", "Cmd", true)
+	makeMod(t, p.CmdWorkshop, "3", "CmdUnmarked", false)
+
+	n, err := RemoveManagedMods(p)
+	if err != nil || n != 1 {
+		t.Fatalf("RemoveManagedMods = %d, %v; want 1", n, err)
+	}
+	for _, keep := range []string{filepath.Join(p.Workshop, "1"), filepath.Join(p.CmdWorkshop, "3")} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("%s was removed", keep)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(p.CmdWorkshop, "2")); !os.IsNotExist(err) {
+		t.Error("managed steamcmd mod not removed")
+	}
+}
+
+func TestEnsureSymlinks(t *testing.T) {
+	p := testPaths(t)
+	if err := os.MkdirAll(p.DayZ, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeMod(t, p.Workshop, "1", "A", false)
+	makeMod(t, p.CmdWorkshop, "2", "B", false)
+	makeMod(t, p.CmdWorkshop, "3", "C", false)
+	makeMod(t, p.Workshop, "4", "D", false)
+
+	// @2: stale link to a source that no longer exists.
+	if err := os.Symlink(filepath.Join(p.Workshop, "2"), filepath.Join(p.DayZ, "@2")); err != nil {
+		t.Fatal(err)
+	}
+	// @3: link to a different, existing dir.
+	other := filepath.Join(t.TempDir(), "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, filepath.Join(p.DayZ, "@3")); err != nil {
+		t.Fatal(err)
+	}
+	// @4: a real directory, which must be left alone.
+	if err := os.MkdirAll(filepath.Join(p.DayZ, "@4", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureSymlinks(p.DayZ, p.ModDirs(), []string{"1", "2", "3", "4"}); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{
+		"1": filepath.Join(p.Workshop, "1"),
+		"2": filepath.Join(p.CmdWorkshop, "2"),
+		"3": filepath.Join(p.CmdWorkshop, "3"),
+	} {
+		got, err := os.Readlink(filepath.Join(p.DayZ, "@"+id))
+		if err != nil || got != want {
+			t.Errorf("@%s -> %q (%v), want %q", id, got, err, want)
+		}
+	}
+	if fi, err := os.Lstat(filepath.Join(p.DayZ, "@4")); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("@4 real dir was touched: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.DayZ, "@4", "keep")); err != nil {
+		t.Error("@4 contents lost")
+	}
+
+	// Idempotent.
+	if err := EnsureSymlinks(p.DayZ, p.ModDirs(), []string{"1", "2"}); err != nil {
+		t.Fatal(err)
+	}
+	// Missing everywhere is an error.
+	if err := EnsureSymlinks(p.DayZ, p.ModDirs(), []string{"99"}); err == nil {
+		t.Error("want error for missing mod")
+	}
+	// A malformed ID is named in the error and nothing is linked for it.
+	err := EnsureSymlinks(p.DayZ, p.ModDirs(), []string{"1", "../2", "1e5"})
+	if err == nil || !strings.Contains(err.Error(), "../2") || !strings.Contains(err.Error(), "1e5") {
+		t.Errorf("err = %v, want both bad IDs named", err)
+	}
+	if _, err := os.Lstat(filepath.Join(p.DayZ, "@../2")); !os.IsNotExist(err) {
+		t.Error("link made for a bad ID")
 	}
 }
 
@@ -145,7 +465,7 @@ func TestFindSteamCMD(t *testing.T) {
 			home, bin := t.TempDir(), t.TempDir()
 			t.Setenv("PATH", bin)
 			tt.setup(t, home, bin)
-			got, err := findSteamCMD(tt.configured(home, bin), home, exec.LookPath)
+			got, err := findSteamCMD(tt.configured(home, bin), home, exec.LookPath, nil)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
@@ -157,6 +477,325 @@ func TestFindSteamCMD(t *testing.T) {
 			}
 			if want := tt.want(home, bin); got != want {
 				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestValidateSteamLogin(t *testing.T) {
+	for _, ok := range []string{"anonymous", "some_user", "User_1"} {
+		if err := ValidateSteamLogin(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "+quit", "a b", "a\tb", "a\nb", "a\x00b", " x", "User-1.x", "a\"b", "bob@x", "jörg"} {
+		if err := ValidateSteamLogin(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if _, err := LoginCmd("/bin/true", "x +quit"); err == nil {
+		t.Error("LoginCmd accepted a bad login")
+	}
+	if err := DownloadMod("/bin/true", "+x", t.TempDir(), "123"); err == nil {
+		t.Error("DownloadMod accepted a bad login")
+	} else if !strings.Contains(err.Error(), "letters, digits and '_'") {
+		t.Errorf("error does not say what is allowed: %v", err)
+	}
+}
+
+func TestValidateContentDir(t *testing.T) {
+	if err := ValidateContentDir("/home/me/.local/share/dzman/steamcmd-content"); err != nil {
+		t.Error(err)
+	}
+	for _, bad := range []string{"", "/home/my name/x", "/x\ty", "/a\"b", "/a+b", "/a\nb"} {
+		if err := ValidateContentDir(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "with space")
+	if err := DownloadMod("/bin/true", "bob", dir, "123"); err == nil || !strings.Contains(err.Error(), "whitespace") {
+		t.Errorf("DownloadMod: %v", err)
+	}
+	if _, err := os.Stat(dir); err == nil {
+		t.Error("DownloadMod created the refused dir")
+	}
+}
+
+func TestFindSteamCMDSkipsNonIsolated(t *testing.T) {
+	home, bin := t.TempDir(), t.TempDir()
+	t.Setenv("PATH", bin)
+	script := func(p string) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := filepath.Join(home, ".steam", "steam")
+	inClient := filepath.Join(root, "steamcmd", "steamcmd.sh")
+	good := filepath.Join(home, "steamcmd", "steamcmd.sh")
+	script(inClient)
+	script(filepath.Join(bin, "steamcmd.sh"))
+	if err := os.Remove(filepath.Join(bin, "steamcmd.sh")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(inClient, filepath.Join(bin, "steamcmd.sh")); err != nil {
+		t.Fatal(err)
+	}
+	// Only a refused candidate: its refusal is the error.
+	if _, err := findSteamCMD("steamcmd", home, exec.LookPath, []string{root}); err == nil ||
+		!strings.Contains(err.Error(), "inside the Steam client's folder") {
+		t.Fatalf("err = %v", err)
+	}
+	script(good)
+	got, err := findSteamCMD("steamcmd", home, exec.LookPath, []string{root})
+	if err != nil || got != good {
+		t.Errorf("got %q, %v, want %q", got, err, good)
+	}
+	// An explicit path is returned as is, for the caller to refuse.
+	got, err = findSteamCMD(inClient, home, exec.LookPath, []string{root})
+	if err != nil || got != inClient {
+		t.Errorf("explicit: got %q, %v", got, err)
+	}
+}
+
+// The folder name is the mod's ID; meta.cpp's publishedid is display only.
+func TestScanUsesFolderNameAsID(t *testing.T) {
+	p := testPaths(t)
+	write := func(folder, meta string) {
+		t.Helper()
+		d := filepath.Join(p.Workshop, folder)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "meta.cpp"), []byte(meta), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("111", "name = \"Moved\";\npublishedid = 999;\n")
+	write("222", "name = \"Zero\";\npublishedid = 0;\n")
+	write("333", "name = \"NoID\";\n")
+	write("0444", "name = \"Padded\";\npublishedid = 444;\n")
+	write("notanid", "name = \"Junk\";\npublishedid = 555;\n")
+
+	mods, err := ScanAllMods(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]InstalledMod{}
+	for _, m := range mods {
+		got[m.ID] = m
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %+v, want mods 111, 222, 333", mods)
+	}
+	if m := got["111"]; m.Name != "Moved" || m.MetaID != "999" || m.Dir != filepath.Join(p.Workshop, "111") {
+		t.Errorf("111 = %+v", m)
+	}
+	if m := got["222"]; m.MetaID != "0" {
+		t.Errorf("222 = %+v", m)
+	}
+	if m := got["333"]; m.Name != "NoID" || m.MetaID != "" {
+		t.Errorf("333 = %+v", m)
+	}
+	for _, m := range mods {
+		if d, ok := p.FindMod(m.ID); !ok || d != m.Dir {
+			t.Errorf("FindMod(%s) = %q %v, want %s", m.ID, d, ok, m.Dir)
+		}
+	}
+}
+
+func TestRemoveMarkedRefusesClientRoot(t *testing.T) {
+	p := testPaths(t)
+	makeMod(t, p.Workshop, "1", "Client", true)
+	// A symlink to the client's workshop dir must resolve and be refused.
+	link := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(p.Workshop, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{p.Workshop, link} {
+		if n, err := removeMarked(dir, []string{p.Root()}); err == nil || n != 0 {
+			t.Errorf("removeMarked(%s) = %d, %v; want refusal", dir, n, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(p.Workshop, "1")); err != nil {
+		t.Error("client mod removed")
+	}
+}
+
+// mkTree creates dirs and files (a trailing "/" marks a dir) under base.
+func mkTree(t *testing.T, base string, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		full := filepath.Join(base, p)
+		if strings.HasSuffix(p, "/") {
+			if err := os.MkdirAll(full, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestFindClientRoot(t *testing.T) {
+	t.Run("custom root is a secondary library", func(t *testing.T) {
+		home := t.TempDir()
+		mkTree(t, home, ".local/share/Steam/steam.sh", "games/steamapps/common/DayZ/")
+		if err := os.MkdirAll(filepath.Join(home, ".steam"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(home, ".local/share/Steam"), filepath.Join(home, ".steam", "root")); err != nil {
+			t.Fatal(err)
+		}
+		got := findClientRoot(home, filepath.Join(home, "games"))
+		if want := resolvePath(filepath.Join(home, ".local/share/Steam")); got != want {
+			t.Errorf("got %q, want the resolved ~/.steam/root %q", got, want)
+		}
+	})
+	t.Run("custom root that is a client install wins", func(t *testing.T) {
+		home := t.TempDir()
+		mkTree(t, home, ".local/share/Steam/steam.sh", "opt/steam/ubuntu12_32/")
+		if got, want := findClientRoot(home, filepath.Join(home, "opt/steam")), filepath.Join(home, "opt/steam"); got != resolvePath(want) {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("order and libraryfolders marker", func(t *testing.T) {
+		home := t.TempDir()
+		mkTree(t, home, ".steam/steam/steamapps/libraryfolders.vdf", ".local/share/Steam/steam.sh")
+		if got, want := findClientRoot(home, ""), filepath.Join(home, ".steam/steam"); got != resolvePath(want) {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("flatpak", func(t *testing.T) {
+		home := t.TempDir()
+		mkTree(t, home, FlatpakSteamRoot+"/steamapps/libraryfolders.vdf")
+		if got, want := findClientRoot(home, ""), filepath.Join(home, FlatpakSteamRoot); got != resolvePath(want) {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("custom with only libraryfolders is the last resort", func(t *testing.T) {
+		home := t.TempDir()
+		mkTree(t, home, "lib/steamapps/libraryfolders.vdf")
+		if got, want := findClientRoot(home, filepath.Join(home, "lib")), filepath.Join(home, "lib"); got != resolvePath(want) {
+			t.Errorf("got %q, want %q", got, want)
+		}
+		if got := findClientRoot(t.TempDir(), ""); got != "" {
+			t.Errorf("empty home: got %q", got)
+		}
+	})
+}
+
+func TestPathsClientRootAndFlatpak(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	lib := filepath.Join(home, "games", "steamapps")
+	p := &Paths{SteamApps: lib}
+	if p.ClientRoot() != filepath.Join(home, "games") || p.Flatpak() {
+		t.Errorf("no client: root %q flatpak %v", p.ClientRoot(), p.Flatpak())
+	}
+	p.Client = filepath.Join(home, ".local", "share", "Steam")
+	if p.ClientRoot() != p.Client || p.Flatpak() {
+		t.Errorf("native client: root %q flatpak %v", p.ClientRoot(), p.Flatpak())
+	}
+	// A DayZ library inside the Flatpak tree means Flatpak Steam, even
+	// when the client root found is another one.
+	p.SteamApps = filepath.Join(home, FlatpakSteamRoot, "steamapps")
+	if !p.Flatpak() {
+		t.Error("library in the Flatpak tree not detected as Flatpak")
+	}
+	p = &Paths{SteamApps: lib, Client: filepath.Join(home, FlatpakSteamRoot)}
+	if !p.Flatpak() {
+		t.Error("Flatpak client root not detected")
+	}
+}
+
+func TestDetectPathsSecondaryLibrary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	mkTree(t, home, FlatpakSteamRoot+"/steam.sh", "games/steamapps/common/DayZ/")
+	p, err := DetectPaths(filepath.Join(home, "games"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Root() != filepath.Join(home, "games") || p.ClientRoot() != resolvePath(filepath.Join(home, FlatpakSteamRoot)) {
+		t.Errorf("root %q client %q", p.Root(), p.ClientRoot())
+	}
+	if want := filepath.Join(home, ".var", "app", "com.valvesoftware.Steam", "data", "dzman", "steamcmd-content"); p.CmdContent != want {
+		t.Errorf("content %q, want the Flatpak one %q", p.CmdContent, want)
+	}
+}
+
+const registryFixture = `"Registry"
+{
+	"HKCU"
+	{
+		"Software"
+		{
+			"Valve"
+			{
+				"Steam"
+				{
+					"AutoLoginUser"		"bob"
+					"SourceModInstallPath"		"/home/bob/.steam/steam/steamapps/sourcemods"
+					// a comment
+					"apps"
+					{
+						"7"
+						{
+							"Running"		"1"
+						}
+						"221100"
+						{
+							"installed"		"1"
+							"Running"		"%s"
+							"name"		"say \"hi\" {not a block}"
+						}
+					}
+				}
+			}
+		}
+	}
+}
+`
+
+func TestAppRunning(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	on := write("on.vdf", strings.Replace(registryFixture, "%s", "1", 1))
+	off := write("off.vdf", strings.Replace(registryFixture, "%s", "0", 1))
+	noKey := write("nokey.vdf", strings.Replace(registryFixture, `"Running"		"%s"`, "", 1))
+	broken := write("broken.vdf", `"Registry" { "HKCU" { "Software" {`)
+	missing := filepath.Join(dir, "missing.vdf")
+	for _, tc := range []struct {
+		name           string
+		files          []string
+		running, known bool
+	}{
+		{"running", []string{on}, true, true},
+		{"not running", []string{off}, false, true},
+		{"no key", []string{noKey}, false, false},
+		{"missing file", []string{missing}, false, false},
+		{"broken file", []string{broken}, false, false},
+		{"any file running", []string{missing, off, on}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			running, known := AppRunning(tc.files, GameID)
+			if running != tc.running || known != tc.known {
+				t.Errorf("got running=%v known=%v, want %v %v", running, known, tc.running, tc.known)
 			}
 		})
 	}

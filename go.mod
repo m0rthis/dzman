@@ -1,11 +1,12 @@
 module github.com/braydencw1/dzman
 
-go 1.27.2
+go 1.27.4
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/ebitengine/purego v0.11.2
 )
 
 require (

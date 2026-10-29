@@ -18,6 +18,32 @@ const (
 	GameID = "221100"
 )
 
+// Mod backends for Config.ModBackend.
+const (
+	// BackendAuto uses Steamworks when libsteam_api.so is found and Steam is
+	// running, else steamcmd when enabled and found, else manual.
+	BackendAuto = "auto"
+	// BackendSteamworks asks the running Steam client to download mods.
+	BackendSteamworks = "steamworks"
+	// BackendSteamCMD downloads mods with steamcmd into dzman's own dir.
+	BackendSteamCMD = "steamcmd"
+	// BackendManual opens the Workshop pages for the user to subscribe.
+	BackendManual = "manual"
+)
+
+// Backends lists the ModBackend values in menu order.
+var Backends = []string{BackendAuto, BackendSteamworks, BackendSteamCMD, BackendManual}
+
+// Backend returns ModBackend, treating empty or unknown values as auto.
+func (c *Config) Backend() string {
+	for _, b := range Backends {
+		if c.ModBackend == b {
+			return b
+		}
+	}
+	return BackendAuto
+}
+
 // AppVersion is the running application version, injected at build time via
 // the version package (falls back to "dev" for plain builds).
 var AppVersion = version.Version
@@ -68,7 +94,18 @@ type Config struct {
 	ServerDBTTL Duration `json:"server_db_ttl"`
 	// NewsDBTTL is how long the cached news is valid.
 	NewsDBTTL Duration `json:"news_db_ttl"`
-	// SteamCMDEnabled controls whether steamcmd is used for mod management.
+	// ModBackend picks how missing mods are fetched: "auto", "steamworks",
+	// "steamcmd" or "manual". See the Backend* constants.
+	ModBackend string `json:"mod_backend"`
+	// SteamAPIPath is an explicit libsteam_api.so for the Steamworks backend.
+	// Empty means search ~/.config/dzman/ and the installed games.
+	SteamAPIPath string `json:"steam_api_path"`
+	// SteamworksTimeout is the overall limit for one Steamworks download run.
+	SteamworksTimeout Duration `json:"steamworks_timeout"`
+	// SteamworksStall aborts a Steamworks run after this long without progress.
+	SteamworksStall Duration `json:"steamworks_stall"`
+	// SteamCMDEnabled controls whether steamcmd may be used (the steamcmd
+	// backend, and the auto backend's fallback).
 	SteamCMDEnabled bool `json:"steamcmd_enabled"`
 	// SteamCMDPath is the path to the steamcmd binary (default: "steamcmd").
 	SteamCMDPath string `json:"steamcmd_path"`
@@ -99,6 +136,9 @@ func defaults() *Config {
 		RequestTimeout:     Duration(10 * time.Second),
 		ServerDBTTL:        Duration(5 * time.Minute),
 		NewsDBTTL:          Duration(time.Hour),
+		ModBackend:         BackendAuto,
+		SteamworksTimeout:  Duration(30 * time.Minute),
+		SteamworksStall:    Duration(5 * time.Minute),
 		SteamCMDEnabled:    true,
 		SteamCMDPath:       "steamcmd",
 		FilterModLimit:     10,
@@ -134,8 +174,20 @@ func Load() (*Config, error) {
 		// Re-populate runtime paths cleared by Unmarshal.
 		cfg.setRuntimePaths(dir)
 	}
+	cfg.capLimits()
 
 	return cfg, nil
+}
+
+// MaxSteamworksLimit caps steamworks_timeout and steamworks_stall. A run that
+// long is already a stuck one, and the cap keeps deadline arithmetic from
+// overflowing.
+const MaxSteamworksLimit = Duration(24 * time.Hour)
+
+// capLimits clamps the Steamworks limits to MaxSteamworksLimit.
+func (c *Config) capLimits() {
+	c.SteamworksTimeout = min(c.SteamworksTimeout, MaxSteamworksLimit)
+	c.SteamworksStall = min(c.SteamworksStall, MaxSteamworksLimit)
 }
 
 func (c *Config) setRuntimePaths(dir string) {

@@ -51,3 +51,29 @@ func TestDurationUnmarshalInvalid(t *testing.T) {
 		t.Error("expected error for invalid duration string, got nil")
 	}
 }
+
+func TestOldConfigGetsBackendDefaults(t *testing.T) {
+	// A dzman.json from before mod_backend existed.
+	c := defaults()
+	if err := json.Unmarshal([]byte(`{"steamcmd_enabled":false,"steamcmd_path":"/x/steamcmd.sh"}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Backend() != BackendAuto || c.SteamCMDEnabled || c.SteamworksTimeout.Std() != 30*time.Minute {
+		t.Errorf("got backend %q, steamcmd %v, timeout %s", c.Backend(), c.SteamCMDEnabled, c.SteamworksTimeout)
+	}
+	c.ModBackend = "bogus"
+	if c.Backend() != BackendAuto {
+		t.Errorf("unknown backend = %q", c.Backend())
+	}
+}
+
+func TestCapLimits(t *testing.T) {
+	c := defaults()
+	if err := json.Unmarshal([]byte(`{"steamworks_timeout":"100000h","steamworks_stall":"2h"}`), c); err != nil {
+		t.Fatal(err)
+	}
+	c.capLimits()
+	if c.SteamworksTimeout != MaxSteamworksLimit || c.SteamworksStall.Std() != 2*time.Hour {
+		t.Errorf("timeout %s stall %s", c.SteamworksTimeout, c.SteamworksStall)
+	}
+}
