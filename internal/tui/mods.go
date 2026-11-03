@@ -134,11 +134,15 @@ var errLibPending = errors.New("looking for libsteam_api.so…")
 
 // libFindOptions are FindLibrary's inputs for the current config.
 func (m Model) libFindOptions() steamworks.FindOptions {
-	opts := steamworks.FindOptions{Configured: m.cfg.SteamAPIPath, ConfigDir: m.cfg.Dir}
-	if m.paths != nil {
+	return libFindOptions(m.cfg, m.paths)
+}
+
+func libFindOptions(cfg *config.Config, paths *steam.Paths) steamworks.FindOptions {
+	opts := steamworks.FindOptions{Configured: cfg.SteamAPIPath, ConfigDir: cfg.Dir}
+	if paths != nil {
 		// The client's libraries, plus DayZ's own in case the client's
 		// list does not have it.
-		opts.SteamApps = append(steamworks.LibraryFolders(m.paths.ClientRoot()), m.paths.SteamApps)
+		opts.SteamApps = append(steamworks.LibraryFolders(paths.ClientRoot()), paths.SteamApps)
 	}
 	return opts
 }
@@ -199,28 +203,37 @@ func (m Model) libAppeared() bool {
 // library lookup to run, if one is due.
 func (m *Model) backendInputs() (backendInputs, tea.Cmd) {
 	lib, cmd := m.library()
+	return gatherBackendInputs(m.cfg, m.profile, m.paths, lib), cmd
+}
+
+// gatherBackendInputs is backendInputs for a given library lookup result.
+func gatherBackendInputs(cfg *config.Config, profile *config.Profile, paths *steam.Paths, lib libLookup) backendInputs {
 	in := backendInputs{
-		mode:         m.cfg.Backend(),
+		mode:         cfg.Backend(),
 		lib:          lib.path,
 		libErr:       lib.err,
 		steamRunning: launcher.IsSteamRunning(),
-		flatpak:      m.paths != nil && m.paths.Flatpak(),
-		cmdEnabled:   m.cfg.SteamCMDEnabled,
-		loginOK:      m.profile.SteamLogin != "" && m.profile.SteamLogin != "anonymous",
+		flatpak:      paths != nil && paths.Flatpak(),
+		cmdEnabled:   cfg.SteamCMDEnabled,
+		loginOK:      profile.SteamLogin != "" && profile.SteamLogin != "anonymous",
 	}
-	in.cmdPath, in.cmdErr = m.resolveSteamCMD()
-	return in, cmd
+	in.cmdPath, in.cmdErr = resolveSteamCMD(cfg, profile, paths)
+	return in
 }
 
 // resolveSteamCMD finds steamcmd and refuses one inside any Steam client
 // root, known paths or not.
 func (m Model) resolveSteamCMD() (string, error) {
-	extra := []string{m.profile.SteamRoot}
-	if m.paths != nil {
-		extra = append(extra, m.paths.Root(), m.paths.ClientRoot())
+	return resolveSteamCMD(m.cfg, m.profile, m.paths)
+}
+
+func resolveSteamCMD(cfg *config.Config, profile *config.Profile, paths *steam.Paths) (string, error) {
+	extra := []string{profile.SteamRoot}
+	if paths != nil {
+		extra = append(extra, paths.Root(), paths.ClientRoot())
 	}
 	roots := steam.ClientRoots(extra...)
-	path, err := steam.FindSteamCMD(m.cfg.SteamCMDPath, roots...)
+	path, err := steam.FindSteamCMD(cfg.SteamCMDPath, roots...)
 	if err != nil {
 		return "", err
 	}
@@ -496,13 +509,15 @@ func rescanAfterSteamworksCmd(paths *steam.Paths) tea.Cmd {
 
 // searchesFolder reports whether a mod installed in folder is one dzman
 // finds: folder is <one of ModDirs>/<ID>. Symlinks are resolved.
-func (m Model) searchesFolder(folder string) bool {
-	if m.paths == nil {
+func (m Model) searchesFolder(folder string) bool { return searchesFolder(m.paths, folder) }
+
+func searchesFolder(paths *steam.Paths, folder string) bool {
+	if paths == nil {
 		return false
 	}
 	parent := filepath.Dir(filepath.Clean(folder))
 	rp := evalOr(parent)
-	for _, d := range m.paths.ModDirs() {
+	for _, d := range paths.ModDirs() {
 		if d != "" && (filepath.Clean(d) == parent || evalOr(d) == rp) {
 			return true
 		}

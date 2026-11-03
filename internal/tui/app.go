@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -135,6 +136,8 @@ type Model struct {
 	// Setup wizard.
 	step      setupStep
 	useCMD    bool
+	srvErr    error  // the server list failed to load
+	mainNote  string // one-off status line on the main menu, cleared by the next key
 	setupNote string // dim note shown on the player-name step (login result)
 
 	// UI components.
@@ -202,20 +205,34 @@ func (m Model) Init() tea.Cmd {
 func (m Model) fetchServersCmd(force bool) tea.Cmd {
 	cfg := m.cfg
 	return func() tea.Msg {
-		if !force {
-			if sl, ok := api.LoadCache[api.ServerList](cfg.ServersCachePath, cfg.ServerDBTTL.Std()); ok {
-				return serversLoadedMsg{list: sl}
-			}
-		}
-		sl, err := api.FetchServers(cfg.APIBaseURL, cfg.UserAgent)
+		sl, err := loadServers(cfg, force)
 		if err != nil {
 			return serversLoadedMsg{err: err}
 		}
-		count, _ := api.FetchPlayersOnline(cfg.UserAgent)
-		sl.PlayersOnline = count
-		_ = api.SaveCache(cfg.ServersCachePath, sl)
 		return serversLoadedMsg{list: sl}
 	}
+}
+
+// loadServers is the server-list lookup behind fetchServersCmd.
+func loadServers(cfg *config.Config, force bool) (*api.ServerList, error) {
+	if !force {
+		if sl, ok := api.LoadCache[api.ServerList](cfg.ServersCachePath, cfg.ServerDBTTL.Std()); ok {
+			return sl, nil
+		}
+	}
+	return fetchServers(context.Background(), cfg)
+}
+
+// fetchServers downloads the server list and caches it.
+func fetchServers(ctx context.Context, cfg *config.Config) (*api.ServerList, error) {
+	sl, err := api.FetchServersContext(ctx, cfg.APIBaseURL, cfg.UserAgent)
+	if err != nil {
+		return nil, err
+	}
+	count, _ := api.FetchPlayersOnlineContext(ctx, cfg.UserAgent)
+	sl.PlayersOnline = count
+	_ = api.SaveCache(cfg.ServersCachePath, sl)
+	return sl, nil
 }
 
 func (m Model) fetchNewsCmd(force bool) tea.Cmd {
@@ -283,6 +300,36 @@ func launchDayZCmd(playerName string, steamArgs []string) tea.Cmd {
 	}
 }
 
+// launchServerCmd is launchDayZCmd for a listed server. It reports twice: a
+// gameStartedMsg as soon as the steam command has started, so the model can
+// record the join even if the user quits during the wait for the game, then
+// the gameLaunchedMsg that wait command delivers. Neither touches the model
+// from the command goroutine.
+func launchServerCmd(srv *api.Server, playerName string, steamArgs []string) tea.Cmd {
+	joined := *srv
+	return func() tea.Msg {
+		started := make(chan struct{}, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- startDayZ(playerName, steamArgs, func() { started <- struct{}{} })
+		}()
+		startedMsg := func(wait tea.Cmd) tea.Msg { return gameStartedMsg{joined: &joined, wait: wait} }
+		select {
+		case <-started:
+			return startedMsg(func() tea.Msg { return gameLaunchedMsg{err: <-done} })
+		case err := <-done:
+			// It may have finished right after calling started; both are
+			// ready then and select picks either.
+			select {
+			case <-started:
+				return startedMsg(func() tea.Msg { return gameLaunchedMsg{err: err} })
+			default:
+				return gameLaunchedMsg{err: err}
+			}
+		}
+	}
+}
+
 // steamCMDUpdateCmd re-downloads the dzman-managed steamcmd mods into
 // contentDir. Mods with a malformed ID are skipped and reported. The game
 // itself is left to the Steam client.
@@ -334,24 +381,37 @@ func (m Model) steamLoginCmd() tea.Cmd {
 // Mods with a malformed ID are not passed to steamcmd; they are reported.
 func installMissingModsCmd(steamcmdPath, login string, paths *steam.Paths, mods []api.Mod) tea.Cmd {
 	return func() tea.Msg {
-		var bad []string
-		seen := map[string]bool{}
-		for _, mod := range mods {
-			if seen[mod.SteamWorkshopID] {
-				continue // listed twice; one download is enough
-			}
-			seen[mod.SteamWorkshopID] = true
-			if !steam.ValidModID(mod.SteamWorkshopID) {
-				bad = append(bad, invalidModLine(mod))
-				continue
-			}
-			if err := steam.DownloadMod(steamcmdPath, login, paths.CmdContent, mod.SteamWorkshopID); err != nil {
-				return modsInstalledMsg{bad: bad, err: err}
-			}
+		bad, err := installMissingMods(context.Background(), steamcmdPath, login, paths, mods)
+		if err != nil {
+			return modsInstalledMsg{bad: bad, err: err}
 		}
 		installed, err := steam.ScanAllMods(paths)
 		return modsInstalledMsg{mods: installed, bad: bad, err: err}
 	}
+}
+
+// installMissingMods downloads mods with steamcmd, one at a time. It returns
+// the per-item reports for mods with a malformed ID, which are skipped.
+// ctx is checked between mods, so a cancelled join stops before the next one.
+func installMissingMods(ctx context.Context, steamcmdPath, login string, paths *steam.Paths, mods []api.Mod) (bad []string, err error) {
+	seen := map[string]bool{}
+	for _, mod := range mods {
+		if err := ctx.Err(); err != nil {
+			return bad, err
+		}
+		if seen[mod.SteamWorkshopID] {
+			continue // listed twice; one download is enough
+		}
+		seen[mod.SteamWorkshopID] = true
+		if !steam.ValidModID(mod.SteamWorkshopID) {
+			bad = append(bad, invalidModLine(mod))
+			continue
+		}
+		if err := steam.DownloadModContext(ctx, steamcmdPath, login, paths.CmdContent, mod.SteamWorkshopID); err != nil {
+			return bad, err
+		}
+	}
+	return bad, nil
 }
 
 // invalidModLine is the per-item report for a server mod with a bad ID.
@@ -395,6 +455,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case serversLoadedMsg:
 		if msg.err != nil {
 			m.err = msg.err
+			m.srvErr = msg.err
 		} else {
 			m.servers = msg.list.Result
 			m.totalPlayers = msg.list.PlayersOnline
@@ -525,6 +586,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Quit
+
+	case gameStartedMsg:
+		recordJoin(m.cfg, m.profile, msg.joined)
+		return m, msg.wait
 
 	case errMsg:
 		m.err = msg.err
@@ -862,7 +927,11 @@ func (m Model) finishSetup() (Model, tea.Cmd) {
 // ---- Main menu -------------------------------------------------------
 
 func (m Model) buildMainList() (Model, tea.Cmd) {
-	labels := []string{"All Servers", "Filter Servers"}
+	var labels []string
+	if len(m.profile.History) > 0 {
+		labels = append(labels, rejoinLabel(m.profile))
+	}
+	labels = append(labels, "All Servers", "Filter Servers")
 	if len(m.profile.Favorites) > 0 {
 		labels = append(labels, "Favorites")
 	}
@@ -874,10 +943,14 @@ func (m Model) buildMainList() (Model, tea.Cmd) {
 		"DayZ News", "Installed Mods", "Config",
 	)
 	m.list = newList(newMenuItems(labels...), "DayZ Manager", m.w, m.h-8)
+	if len(m.profile.History) > 0 {
+		m.list.Select(1) // not the Rejoin item: Enter should not join a server by accident
+	}
 	return m, nil
 }
 
 func (m Model) keyMain(msg tea.KeyMsg) (Model, tea.Cmd) {
+	m.mainNote = ""
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -893,7 +966,37 @@ func (m Model) keyMain(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
+// rejoinLabel is the main-menu item for the most recent server in the history.
+func rejoinLabel(p *config.Profile) string { return "Rejoin " + SanitizeText(p.History[0].Name) }
+
+// rejoin joins the most recent server in the history the way picking it under
+// Recently Played does: through the server's mod check, password and launch.
+func (m Model) rejoin() (Model, tea.Cmd) {
+	t, err := RejoinTarget(m.profile)
+	if err == nil {
+		if srv := findServer(m.servers, t); srv != nil {
+			m.prevPage = pageMain
+			m.sel = srv
+			return m.playServer(srv)
+		}
+		switch {
+		case !m.loadedSrv:
+			m.mainNote = "The server list is still loading"
+		case m.srvErr != nil:
+			m.mainNote = "The server list failed to load: " + SanitizeText(m.srvErr.Error())
+		default:
+			m.mainNote = SanitizeText(t.Name) + " isn't in the server list right now"
+		}
+		return m, nil
+	}
+	m.mainNote = SanitizeText(err.Error())
+	return m, nil
+}
+
 func (m Model) handleMainSelect(label string) (Model, tea.Cmd) {
+	if len(m.profile.History) > 0 && label == rejoinLabel(m.profile) {
+		return m.rejoin()
+	}
 	switch label {
 	case "All Servers":
 		m.bKind = browserAll
@@ -1434,12 +1537,17 @@ func (m Model) playServer(srv *api.Server) (Model, tea.Cmd) {
 
 // missingServerMods returns the server mods found in neither mod dir.
 func (m Model) missingServerMods(srv *api.Server) []api.Mod {
-	if m.paths == nil || srv == nil {
+	return missingMods(m.paths, srv)
+}
+
+// missingMods returns the mods of srv found in neither of paths' mod dirs.
+func missingMods(paths *steam.Paths, srv *api.Server) []api.Mod {
+	if paths == nil || srv == nil {
 		return nil
 	}
 	var missing []api.Mod
 	for _, mod := range srv.Mods {
-		if _, ok := m.paths.FindMod(mod.SteamWorkshopID); !ok {
+		if _, ok := paths.FindMod(mod.SteamWorkshopID); !ok {
 			missing = append(missing, mod)
 		}
 	}
@@ -1610,37 +1718,52 @@ func (m Model) keyPassword(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 // doLaunch links the mods, records history, and starts the game.
 func (m Model) doLaunch(srv *api.Server, password string) (Model, tea.Cmd) {
+	args, err := prepareLaunch(m.cfg, m.profile, m.paths, srv, password)
+	if err != nil {
+		m.err = err
+		m.pg = pageError
+		return m, nil
+	}
+	m.loading = true
+	m.loadingMsg = "Launching DayZ…"
+	m.pg = pageLoading
+	return m, tea.Batch(m.spin.Tick, launchServerCmd(srv, m.profile.Player, args))
+}
+
+// prepareLaunch links srv's mods into the DayZ folder and returns the
+// arguments to start DayZ with. It is the part of a launch the TUI and the
+// terminal join share. The join is recorded by recordJoin once DayZ started.
+func prepareLaunch(cfg *config.Config, profile *config.Profile, paths *steam.Paths,
+	srv *api.Server, password string) ([]string, error) {
 	modIDs := make([]string, len(srv.Mods))
 	for i, mod := range srv.Mods {
 		modIDs[i] = mod.SteamWorkshopID
 	}
 	if bad := steam.InvalidModIDs(modIDs); len(bad) > 0 {
-		m.err = fmt.Errorf("invalid workshop IDs from the server: %q", bad)
-		m.pg = pageError
-		return m, nil
+		return nil, fmt.Errorf("invalid workshop IDs from the server: %q", bad)
 	}
-	if m.paths != nil {
-		if err := steam.EnsureSymlinks(m.paths.DayZ, m.paths.ModDirs(), modIDs); err != nil {
-			m.err = err
-			m.pg = pageError
-			return m, nil
+	if paths != nil {
+		if err := steam.EnsureSymlinks(paths.DayZ, paths.ModDirs(), modIDs); err != nil {
+			return nil, err
 		}
 	}
-	m.profile.AddToHistory(srv.Name, srv.Endpoint.IP, srv.Endpoint.Port, m.cfg.HistorySize)
-	_ = m.profile.Save(m.cfg.ProfilePath)
 
 	args := launcher.ConnectArgs{
 		ServerIP:   srv.Endpoint.IP,
 		GamePort:   srv.GamePort,
 		Password:   password,
 		ModIDs:     modIDs,
-		PlayerName: m.profile.Player,
-		ExtraArgs:  m.profile.LaunchArgs(),
+		PlayerName: profile.Player,
+		ExtraArgs:  profile.LaunchArgs(),
 	}
-	m.loading = true
-	m.loadingMsg = "Launching DayZ…"
-	m.pg = pageLoading
-	return m, tea.Batch(m.spin.Tick, launchDayZCmd(m.profile.Player, args.ToSteamArgs()))
+	return args.ToSteamArgs(), nil
+}
+
+// recordJoin adds srv to the history and saves the profile. It runs after
+// DayZ was started, so a launch that fails leaves the history alone.
+func recordJoin(cfg *config.Config, profile *config.Profile, srv *api.Server) {
+	profile.AddToHistory(srv.Name, srv.Endpoint.IP, srv.Endpoint.Port, cfg.HistorySize)
+	_ = profile.Save(cfg.ProfilePath)
 }
 
 // doLaunchDirect launches against an address that is not in the server list.
@@ -2329,6 +2452,9 @@ func (m Model) viewMain() string {
 	}
 	if len(m.news) > 0 {
 		sb.WriteString("\n")
+	}
+	if m.mainNote != "" {
+		sb.WriteString(redStyle.Render("  "+m.mainNote) + "\n")
 	}
 	sb.WriteString(m.list.View() + "\n")
 	sb.WriteString(helpStyle.Render("  ↑↓ navigate  enter select  q quit"))

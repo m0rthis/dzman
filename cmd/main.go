@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -23,6 +25,10 @@ func main() {
 	// Handle `dzman connect <ip> <port>` sub-command for desktop-entry shortcuts.
 	if len(os.Args) == 4 && os.Args[1] == "connect" {
 		directConnect(os.Args[2], os.Args[3])
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "rejoin" {
+		rejoin()
 		return
 	}
 
@@ -73,32 +79,73 @@ func main() {
 }
 
 // directConnect is called when the binary is invoked as `dzman connect ip port`.
-// It looks up the server in the loaded list and launches the game.
+// It syncs the server's mods, records the join and launches the game.
 func directConnect(ipArg, portArg string) {
 	port, err := strconv.Atoi(portArg)
 	if err != nil {
-		fatalf("invalid port %q: %v", portArg, err)
+		cliFail("invalid port %q: %v", portArg, err)
 	}
+	cfg, profile, paths := loadState()
+	join(cfg, profile, paths, tui.JoinTarget{IP: ipArg, Port: port, ByGamePort: true, Name: fmt.Sprintf("%s:%d", ipArg, port)})
+}
 
+// rejoin is `dzman rejoin`: join the most recent server in the history.
+func rejoin() {
+	cfg, profile, paths := loadState()
+	t, err := tui.RejoinTarget(profile)
+	if err != nil {
+		cliFail("%v", err)
+	}
+	join(cfg, profile, paths, t)
+}
+
+// loadState loads the config and profile and detects the Steam paths, as the
+// TUI start-up does. Missing paths are not an error here; Join reports them
+// when it needs them.
+func loadState() (*config.Config, *config.Profile, *steam.Paths) {
 	cfg, err := config.Load()
 	if err != nil {
-		fatalf("load config: %v", err)
+		cliFail("load config: %v", err)
 	}
-
 	profile, err := config.LoadProfile(cfg.ProfilePath)
 	if err != nil {
-		fatalf("load profile: %v", err)
+		cliFail("load profile: %v", err)
 	}
+	paths, _ := steam.DetectPaths(profile.SteamRoot)
+	return cfg, profile, paths
+}
 
-	args := launcher.ConnectArgs{
-		ServerIP:   ipArg,
-		GamePort:   port,
-		PlayerName: profile.Player,
-		ExtraArgs:  profile.LaunchArgs(),
+// join runs the shared terminal join and exits non-zero if it fails.
+func join(cfg *config.Config, profile *config.Profile, paths *steam.Paths, t tui.JoinTarget) {
+	password := os.Getenv(tui.PasswordEnv)
+	// The helper, steamcmd and Steam must not inherit the password.
+	_ = os.Unsetenv(tui.PasswordEnv)
+	err := tui.Join(tui.JoinOptions{
+		Cfg: cfg, Profile: profile, Paths: paths, Target: t,
+		Password: password, Out: os.Stdout,
+	})
+	// Never leave a helper running, whatever happened.
+	steamworks.CancelAll()
+	if errors.Is(err, tui.ErrInterrupted) {
+		fmt.Fprintln(os.Stderr, "dzman: interrupted")
+		os.Exit(130)
 	}
-	if err := launcher.LaunchDayZ(profile.Player, args.ToSteamArgs()); err != nil {
-		fatalf("launch: %v", err)
+	if err != nil {
+		cliFail("%v", err)
 	}
+}
+
+// cliFail is fatalf for connect and rejoin. Desktop shortcuts run in a
+// terminal that closes on exit, so when someone is there to read it, it waits
+// for Enter. The message may carry server text, so control characters are
+// dropped.
+func cliFail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "dzman: %s\n", tui.SanitizeText(fmt.Sprintf(format, args...)))
+	if canPrompt() {
+		fmt.Fprint(os.Stderr, "Press Enter to close…")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+	os.Exit(1)
 }
 
 func fatalf(format string, args ...any) {
@@ -115,7 +162,11 @@ func printUsage() {
 
 Usage:
   dzman                      launch the TUI
-  dzman connect <ip> <port>  connect directly to a server
+  dzman connect <ip> <port>  sync the server's mods, then connect (<port> is the game port)
+  dzman rejoin               do the same for the most recent server in the history
   dzman version              print version information
-  dzman help                 show this help`)
+  dzman help                 show this help
+
+connect and rejoin print progress instead of opening the TUI, and do not launch
+DayZ if the mods cannot be installed. A server password is read from DZMAN_PASSWORD.`)
 }

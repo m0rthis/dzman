@@ -1,13 +1,18 @@
 package steam
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 	"unicode"
 )
 
@@ -340,16 +345,73 @@ func isolatedEnv(environ []string, home string) []string {
 // steamCMDCommand builds a steamcmd command that runs with the isolated HOME,
 // creating it if needed.
 func steamCMDCommand(steamcmdPath string, args ...string) (*exec.Cmd, error) {
+	cmd, _, err := steamCMDCommandContext(context.Background(), steamcmdPath, args...)
+	return cmd, err
+}
+
+// steamCMDCommandContext is steamCMDCommand for a command that ctx can stop.
+// The second result must be called once the command has finished (it is a
+// no-op for a ctx that can never be cancelled, which gets exactly the plain
+// command).
+//
+// steamcmd.sh and distro wrappers run the real binary as a child, so a
+// cancellable command gets its own process group and a cancel signals the
+// whole group: SIGTERM, then SIGKILL after steamCMDStopGrace (and at once
+// when the command finishes after a cancel, so a child that ignores SIGTERM
+// cannot outlive it). Pdeathsig also sends SIGTERM to the command itself if
+// dzman dies, but only to the command, not to a child it started.
+func steamCMDCommandContext(ctx context.Context, steamcmdPath string, args ...string) (*exec.Cmd, func(), error) {
 	home, err := SteamCMDHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.MkdirAll(home, 0o755); err != nil {
-		return nil, fmt.Errorf("create steamcmd home: %w", err)
+		return nil, nil, fmt.Errorf("create steamcmd home: %w", err)
 	}
-	cmd := exec.Command(steamcmdPath, args...)
+	cmd := exec.CommandContext(ctx, steamcmdPath, args...)
 	cmd.Env = isolatedEnv(os.Environ(), home)
-	return cmd, nil
+	if ctx.Done() == nil {
+		return cmd, func() {}, nil
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
+	cmd.WaitDelay = steamCMDWaitDelay
+	var (
+		mu    sync.Mutex
+		pid   int // the group, once a cancel has signalled it
+		timer *time.Timer
+	)
+	cmd.Cancel = func() error {
+		mu.Lock()
+		pid = cmd.Process.Pid
+		timer = time.AfterFunc(steamCMDStopGrace, func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+		stopping.Store(pid, true)
+		mu.Unlock()
+		return syscall.Kill(-pid, syscall.SIGTERM)
+	}
+	return cmd, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if timer != nil {
+			timer.Stop()
+			// Whatever is left of the group (a child that ignored SIGTERM)
+			// goes now.
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			stopping.Delete(pid)
+		}
+	}, nil
+}
+
+// stopping holds the process groups of steamcmd commands that are being
+// stopped (pid -> true), for KillStopping.
+var stopping sync.Map
+
+// KillStopping sends SIGKILL to every steamcmd command that is being stopped
+// after a cancel. It is the second Ctrl+C.
+func KillStopping() {
+	stopping.Range(func(k, _ any) bool {
+		_ = syscall.Kill(-k.(int), syscall.SIGKILL)
+		return true
+	})
 }
 
 // --- SteamCMD operations ---
@@ -456,6 +518,22 @@ func downloadArgs(contentDir, steamLogin, modID string) []string {
 // contentDir (Paths.CmdContent, dzman's steamcmd content dir) and marks it as
 // managed. Output is captured (not streamed) so it cannot corrupt the TUI.
 func DownloadMod(steamcmdPath, steamLogin, contentDir, modID string) error {
+	return DownloadModContext(context.Background(), steamcmdPath, steamLogin, contentDir, modID)
+}
+
+// steamCMDStopGrace is how long a cancelled steamcmd group gets to exit after
+// SIGTERM before it is killed. It is shorter than steamCMDWaitDelay, the time
+// exec waits for the output pipe once the command is stopped.
+const (
+	steamCMDStopGrace = 8 * time.Second
+	steamCMDWaitDelay = 10 * time.Second
+)
+
+// DownloadModContext is DownloadMod that stops steamcmd when ctx is
+// cancelled: it gets SIGTERM, then a kill after steamCMDStopGrace. With a
+// cancellable ctx steamcmd also gets SIGTERM if dzman itself dies. A ctx that
+// can never be cancelled (context.Background) changes nothing.
+func DownloadModContext(ctx context.Context, steamcmdPath, steamLogin, contentDir, modID string) error {
 	if err := ValidateSteamLogin(steamLogin); err != nil {
 		return err
 	}
@@ -468,11 +546,21 @@ func DownloadMod(steamcmdPath, steamLogin, contentDir, modID string) error {
 	if err := os.MkdirAll(contentDir, 0o755); err != nil {
 		return fmt.Errorf("create steamcmd content dir: %w", err)
 	}
-	cmd, err := steamCMDCommand(steamcmdPath, downloadArgs(contentDir, steamLogin, modID)...)
+	cmd, finished, err := steamCMDCommandContext(ctx, steamcmdPath, downloadArgs(contentDir, steamLogin, modID)...)
 	if err != nil {
 		return err
 	}
+	defer finished()
+	if ctx.Done() != nil {
+		// Pdeathsig fires when the thread that started the process exits, so
+		// keep this goroutine on one thread until steamcmd is done.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return runError("download mod "+modID, err, out)
 	}
 	workshop := WorkshopDir(contentDir)

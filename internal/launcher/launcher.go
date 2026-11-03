@@ -64,6 +64,12 @@ func (a ConnectArgs) ToSteamArgs() []string {
 // LaunchDayZ starts DayZ via Steam with the provided game args.
 // It blocks until DayZ appears in the process list or the poll timeout fires.
 func LaunchDayZ(playerName string, gameArgs []string) error {
+	return LaunchDayZNotify(playerName, gameArgs, nil)
+}
+
+// LaunchDayZNotify is LaunchDayZ that calls started, if not nil, once the
+// steam command has been started, before it polls for the game.
+func LaunchDayZNotify(playerName string, gameArgs []string, started func()) error {
 	if IsDayZRunning() {
 		return fmt.Errorf("DayZ is already running")
 	}
@@ -94,6 +100,9 @@ func LaunchDayZ(playerName string, gameArgs []string) error {
 		return fmt.Errorf("launch DayZ: %w", err)
 	}
 	go func() { _ = cmd.Wait() }()
+	if started != nil {
+		started()
+	}
 
 	// Wait for the DayZ process to appear.
 	deadline := time.Now().Add(launchPollTimeout)

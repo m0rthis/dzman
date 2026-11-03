@@ -1,12 +1,16 @@
 package steam
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestIsLoginFailure(t *testing.T) {
@@ -798,5 +802,86 @@ func TestAppRunning(t *testing.T) {
 				t.Errorf("got running=%v known=%v, want %v %v", running, known, tc.running, tc.known)
 			}
 		})
+	}
+}
+
+func TestDownloadModContextCancelStopsSteamCMD(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("DZMAN_TEST_PIDFILE", pidFile)
+	// Like steamcmd.sh: the real work runs as a child, not via exec.
+	script := filepath.Join(t.TempDir(), "steamcmd.sh")
+	body := "#!/bin/sh\nsleep 60 &\necho $! > \"$DZMAN_TEST_PIDFILE\"\nwait\necho done\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := DownloadModContext(ctx, script, "bob", t.TempDir(), "123")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want deadline exceeded", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("returned after %v, want well under the kill grace period", d)
+	}
+	raw, rerr := os.ReadFile(pidFile)
+	if rerr != nil {
+		t.Fatalf("the wrapper never started its child: %v", rerr)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(3 * time.Second)
+	for !processGone(pid) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("child %d of the wrapper is still running", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// processGone reports whether pid no longer exists or is a zombie.
+func processGone(pid int) bool {
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return true
+	}
+	_, after, _ := strings.Cut(string(stat), ") ")
+	return strings.HasPrefix(after, "Z")
+}
+
+func TestDownloadModContextKillsChildIgnoringTerm(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("DZMAN_TEST_PIDFILE", pidFile)
+	// The child ignores SIGTERM and has its output away from the pipe, so the
+	// pipe closes when the wrapper dies and only the group kill can stop it.
+	script := filepath.Join(t.TempDir(), "steamcmd.sh")
+	body := "#!/bin/sh\n(trap '' TERM; exec sleep 60) >/dev/null 2>&1 &\necho $! > \"$DZMAN_TEST_PIDFILE\"\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := DownloadModContext(ctx, script, "bob", t.TempDir(), "123")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want deadline exceeded", err)
+	}
+	raw, rerr := os.ReadFile(pidFile)
+	if rerr != nil {
+		t.Fatalf("the wrapper never started its child: %v", rerr)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(3 * time.Second)
+	for !processGone(pid) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("child %d that ignores SIGTERM is still running", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

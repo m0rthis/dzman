@@ -4,6 +4,7 @@ import (
 	"github.com/braydencw1/dzman/internal/a2s"
 	"github.com/braydencw1/dzman/internal/api"
 	"github.com/braydencw1/dzman/internal/steam"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // serversLoadedMsg carries the result of a server-list fetch.
@@ -71,3 +72,10 @@ type errMsg struct{ err error }
 
 // gameLaunchedMsg is sent when LaunchDayZ returns (success or error).
 type gameLaunchedMsg struct{ err error }
+
+// gameStartedMsg is sent when the steam command for a listed server has
+// started. wait delivers the gameLaunchedMsg.
+type gameStartedMsg struct {
+	joined *api.Server
+	wait   tea.Cmd
+}

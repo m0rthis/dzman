@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -127,8 +128,17 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 // FetchServers downloads the full server list from the API.
 func FetchServers(apiURL, userAgent string) (*ServerList, error) {
+	return FetchServersContext(context.Background(), apiURL, userAgent)
+}
+
+// FetchServersContext is FetchServers that stops when ctx is cancelled.
+func FetchServersContext(ctx context.Context, apiURL, userAgent string) (*ServerList, error) {
 	client := newClient(serverTimeout, userAgent)
-	resp, err := client.Get(apiURL + "/launcher/servers/dayz")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+"/launcher/servers/dayz", nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetch servers: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch servers: %w", err)
 	}
@@ -146,12 +156,21 @@ func FetchServers(apiURL, userAgent string) (*ServerList, error) {
 
 // FetchPlayersOnline returns the number of DayZ players online from Steam.
 func FetchPlayersOnline(userAgent string) (int, error) {
+	return FetchPlayersOnlineContext(context.Background(), userAgent)
+}
+
+// FetchPlayersOnlineContext is FetchPlayersOnline that stops when ctx is cancelled.
+func FetchPlayersOnlineContext(ctx context.Context, userAgent string) (int, error) {
 	u := fmt.Sprintf(
 		"https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=%s",
 		GameID,
 	)
 	client := newClient(reqTimeout, userAgent)
-	resp, err := client.Get(u)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, fmt.Errorf("fetch players online: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("fetch players online: %w", err)
 	}

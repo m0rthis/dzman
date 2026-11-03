@@ -53,10 +53,23 @@ Prebuilt Linux binaries (amd64/arm64) are attached to each
 
 ```bash
 dzman                      # launch the TUI
-dzman connect <ip> <port>  # connect directly (used by desktop shortcuts)
+dzman connect <ip> <port>  # sync the server's mods, then connect (used by desktop shortcuts)
+dzman rejoin               # same, for the most recent server in the history
 dzman version              # print version and build info
 dzman help                 # show usage
 ```
+
+`connect` (the port is the game port) and `rejoin` do not open the TUI. They look
+the server up in the server list, install any missing mods through the
+configured [mod backend](#mods), record the join in the history, and launch
+DayZ. Progress is printed as plain lines, and if the mods cannot be installed
+(backend `manual`, SteamCMD not logged in, Steam not running) dzman says why and
+exits non-zero without launching. Like the TUI, they only install missing mods;
+they do not update installed ones. A server password is read from the
+`DZMAN_PASSWORD` environment variable. `rejoin` needs the server list and the setup wizard to have run once, so run
+`dzman` first on a new install. `connect` still launches (without mods) when the
+server list cannot be loaded or the server is not in it. The main menu also has a
+"Rejoin <server>" item at the top once the history is not empty.
 
 In the browser: `↑↓`/`jk` move · `enter` select · `f` toggle favorite ·
 `/` search · `esc` back · `q` quit.
