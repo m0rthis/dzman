@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/m0rthis/dzman/internal/config"
@@ -22,13 +23,21 @@ func main() {
 		os.Exit(steamworks.RunHelper(os.Args[2:]))
 	}
 
-	// Handle `dzman connect <ip> <port>` sub-command for desktop-entry shortcuts.
-	if len(os.Args) == 4 && os.Args[1] == "connect" {
-		directConnect(os.Args[2], os.Args[3])
-		return
-	}
-	if len(os.Args) == 2 && os.Args[1] == "rejoin" {
-		rejoin()
+	// `dzman connect <ip> <port>` (desktop-entry shortcuts) and `dzman rejoin`.
+	if len(os.Args) > 1 && (os.Args[1] == "connect" || os.Args[1] == "rejoin") {
+		rest, update, err := joinArgs(os.Args[2:])
+		switch {
+		case err != nil:
+			usageFail("%v", err)
+		case os.Args[1] == "connect" && len(rest) == 2:
+			directConnect(rest[0], rest[1], update)
+		case os.Args[1] == "rejoin" && len(rest) == 0:
+			rejoin(update)
+		case os.Args[1] == "connect":
+			usageFail("connect takes an IP and a game port")
+		default:
+			usageFail("rejoin takes no arguments")
+		}
 		return
 	}
 
@@ -78,25 +87,48 @@ func main() {
 	}
 }
 
+// joinArgs splits what follows connect or rejoin into the positional
+// arguments and the update flag (-u, --update), which may come anywhere.
+func joinArgs(args []string) (rest []string, update bool, err error) {
+	for _, a := range args {
+		switch {
+		case a == "-u" || a == "--update":
+			update = true
+		case strings.HasPrefix(a, "-") && a != "-":
+			return nil, false, fmt.Errorf("unknown option %q", a)
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, update, nil
+}
+
+// usageFail reports a malformed command line and exits with status 2.
+func usageFail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "dzman: %s\n\n", fmt.Sprintf(format, args...))
+	printUsage()
+	os.Exit(2)
+}
+
 // directConnect is called when the binary is invoked as `dzman connect ip port`.
 // It syncs the server's mods, records the join and launches the game.
-func directConnect(ipArg, portArg string) {
+func directConnect(ipArg, portArg string, update bool) {
 	port, err := strconv.Atoi(portArg)
 	if err != nil {
 		cliFail("invalid port %q: %v", portArg, err)
 	}
 	cfg, profile, paths := loadState()
-	join(cfg, profile, paths, tui.JoinTarget{IP: ipArg, Port: port, ByGamePort: true, Name: fmt.Sprintf("%s:%d", ipArg, port)})
+	join(cfg, profile, paths, tui.JoinTarget{IP: ipArg, Port: port, ByGamePort: true, Name: fmt.Sprintf("%s:%d", ipArg, port)}, update)
 }
 
 // rejoin is `dzman rejoin`: join the most recent server in the history.
-func rejoin() {
+func rejoin(update bool) {
 	cfg, profile, paths := loadState()
 	t, err := tui.RejoinTarget(profile)
 	if err != nil {
 		cliFail("%v", err)
 	}
-	join(cfg, profile, paths, t)
+	join(cfg, profile, paths, t, update)
 }
 
 // loadState loads the config and profile and detects the Steam paths, as the
@@ -116,13 +148,13 @@ func loadState() (*config.Config, *config.Profile, *steam.Paths) {
 }
 
 // join runs the shared terminal join and exits non-zero if it fails.
-func join(cfg *config.Config, profile *config.Profile, paths *steam.Paths, t tui.JoinTarget) {
+func join(cfg *config.Config, profile *config.Profile, paths *steam.Paths, t tui.JoinTarget, update bool) {
 	password := os.Getenv(tui.PasswordEnv)
 	// The helper, steamcmd and Steam must not inherit the password.
 	_ = os.Unsetenv(tui.PasswordEnv)
 	err := tui.Join(tui.JoinOptions{
 		Cfg: cfg, Profile: profile, Paths: paths, Target: t,
-		Password: password, Out: os.Stdout,
+		Password: password, Update: update, Out: os.Stdout,
 	})
 	// Never leave a helper running, whatever happened.
 	steamworks.CancelAll()
@@ -166,6 +198,9 @@ Usage:
   dzman rejoin               do the same for the most recent server in the history
   dzman version              print version information
   dzman help                 show this help
+
+Options for connect and rejoin:
+  -u, --update               also update the server's mods that are already installed
 
 connect and rejoin print progress instead of opening the TUI, and do not launch
 DayZ if the mods cannot be installed. A server password is read from DZMAN_PASSWORD.`)

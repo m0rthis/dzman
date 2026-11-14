@@ -500,3 +500,48 @@ func TestMainListRejoinItem(t *testing.T) {
 		t.Errorf("rebuilt cursor on %q, want All Servers", got)
 	}
 }
+
+// An update hands every mod of the server to the backend; a plain join only
+// the missing ones.
+func TestModsToSync(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ws, "111"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths := &steam.Paths{Workshop: ws}
+	srv := &api.Server{Mods: []api.Mod{
+		{Name: "have", SteamWorkshopID: "111"},
+		{Name: "lack", SteamWorkshopID: "222"},
+	}}
+	if got := modsToSync(paths, srv, false); len(got) != 1 || got[0].Name != "lack" {
+		t.Errorf("join syncs %v, want only lack", got)
+	}
+	if got := modsToSync(paths, srv, true); len(got) != 2 {
+		t.Errorf("update syncs %v, want both mods", got)
+	}
+	if got := modsToSync(nil, srv, true); got != nil {
+		t.Errorf("without paths update syncs %v, want nothing", got)
+	}
+}
+
+// steamcmd re-downloads what it installed itself and what is missing, and
+// leaves the Steam client's own mods alone.
+func TestSteamCMDUpdatable(t *testing.T) {
+	ws := t.TempDir()
+	for _, id := range []string{"111", "222"} {
+		if err := os.Mkdir(filepath.Join(ws, id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := &steam.Paths{Workshop: ws}
+	installed := []steam.InstalledMod{{ID: "111"}, {ID: "222", Managed: true}}
+	mods := []api.Mod{
+		{Name: "steam's", SteamWorkshopID: "111"},
+		{Name: "managed", SteamWorkshopID: "222"},
+		{Name: "missing", SteamWorkshopID: "333"},
+	}
+	got := steamCMDUpdatable(paths, installed, mods)
+	if len(got) != 2 || got[0].Name != "managed" || got[1].Name != "missing" {
+		t.Errorf("steamCMDUpdatable = %v, want managed and missing", got)
+	}
+}

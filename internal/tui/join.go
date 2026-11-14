@@ -81,7 +81,10 @@ type JoinOptions struct {
 	Target JoinTarget
 	// Password is the server password, if it needs one.
 	Password string
-	Out      io.Writer
+	// Update also brings the server's installed mods up to date (-u), like
+	// the TUI's Update Server Mods, instead of only installing missing ones.
+	Update bool
+	Out    io.Writer
 }
 
 // Join syncs the target server's mods through the configured backend, makes
@@ -253,8 +256,8 @@ func join(ctx context.Context, stopSignals func(), o JoinOptions) error {
 	if len(srv.Mods) > 0 && o.Paths == nil {
 		return errNotSetUp // mods can be neither synced nor linked
 	}
-	if missing := missingMods(o.Paths, srv); len(missing) > 0 {
-		if err := syncMods(ctx, o, srv, missing); err != nil {
+	if mods := modsToSync(o.Paths, srv, o.Update); len(mods) > 0 {
+		if err := syncMods(ctx, o, srv, mods); err != nil {
 			if ctx.Err() != nil {
 				return ErrInterrupted
 			}
@@ -315,12 +318,47 @@ func launch(ctx context.Context, stopSignals func(), out io.Writer, player strin
 	return startDayZ(player, args, started)
 }
 
-// syncMods installs the missing mods with the configured backend.
-func syncMods(ctx context.Context, o JoinOptions, srv *api.Server, missing []api.Mod) error {
+// modsToSync is what a join hands to the mod backend: the server's missing
+// mods, or all of its mods for an update.
+func modsToSync(paths *steam.Paths, srv *api.Server, update bool) []api.Mod {
+	if update && paths != nil {
+		return srv.Mods
+	}
+	return missingMods(paths, srv)
+}
+
+// steamCMDUpdatable is the part of mods steamcmd should download for an
+// update: those not installed and those dzman installed with steamcmd before
+// (managed). The Steam client keeps its own subscribed mods up to date.
+func steamCMDUpdatable(paths *steam.Paths, installed []steam.InstalledMod, mods []api.Mod) []api.Mod {
+	managed := map[string]bool{}
+	for _, m := range installed {
+		if m.Managed {
+			managed[m.ID] = true
+		}
+	}
+	var out []api.Mod
+	for _, m := range mods {
+		if _, ok := paths.FindMod(m.SteamWorkshopID); !ok || managed[m.SteamWorkshopID] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// syncMods installs the missing mods with the configured backend, or with
+// o.Update brings all of the server's mods (mods) up to date.
+func syncMods(ctx context.Context, o JoinOptions, srv *api.Server, mods []api.Mod) error {
 	out := o.Out
-	fmt.Fprintf(out, "%d of %d mods are missing:\n", len(missing), len(srv.Mods))
-	for _, m := range missing {
-		fmt.Fprintf(out, "  %s\n", SanitizeText(m.Name))
+	missing := missingMods(o.Paths, &api.Server{Mods: mods})
+	if len(missing) > 0 {
+		fmt.Fprintf(out, "%d of %d mods are missing:\n", len(missing), len(srv.Mods))
+		for _, m := range missing {
+			fmt.Fprintf(out, "  %s\n", SanitizeText(m.Name))
+		}
+	}
+	if o.Update {
+		fmt.Fprintf(out, "Updating the server's %d mods\n", len(srv.Mods))
 	}
 	path, libErr := steamworks.FindLibrary(libFindOptions(o.Cfg, o.Paths))
 	in := gatherBackendInputs(o.Cfg, o.Profile, o.Paths, libLookup{path: path, err: libErr})
@@ -331,9 +369,24 @@ func syncMods(ctx context.Context, o JoinOptions, srv *api.Server, missing []api
 	}
 	switch backend {
 	case backendSteamworks:
-		return syncSteamworks(ctx, o, in, missing)
+		return syncSteamworks(ctx, o, in, mods)
 	case backendSteamCMD:
-		return syncSteamCMD(ctx, o, in, missing)
+		if o.Update {
+			installed, err := steam.ScanAllMods(o.Paths)
+			if err != nil {
+				return fmt.Errorf("scan installed mods: %w", err)
+			}
+			if mods = steamCMDUpdatable(o.Paths, installed, mods); len(mods) == 0 {
+				fmt.Fprintln(out, "Nothing for SteamCMD to update: the server's mods are all Steam's own")
+				return nil
+			}
+		}
+		return syncSteamCMD(ctx, o, in, mods)
+	}
+	if len(missing) == 0 {
+		// Only an update was asked for, and dzman has no way to run one.
+		fmt.Fprintln(out, "Not updating: no mod backend is available; the Steam client updates subscribed mods itself")
+		return nil
 	}
 	fmt.Fprintln(out, "Subscribe to these in Steam, then run dzman again:")
 	for _, m := range missing {
@@ -346,7 +399,11 @@ func syncSteamCMD(ctx context.Context, o JoinOptions, in backendInputs, missing 
 	if !in.steamCMDReady() {
 		return errors.New("SteamCMD: " + in.steamCMDProblem())
 	}
-	fmt.Fprintf(o.Out, "Installing %d mods with SteamCMD…\n", len(missing))
+	verb := "Installing"
+	if o.Update {
+		verb = "Updating"
+	}
+	fmt.Fprintf(o.Out, "%s %d mods with SteamCMD…\n", verb, len(missing))
 	bad, err := installMissingMods(ctx, in.cmdPath, o.Profile.SteamLogin, o.Paths, missing)
 	for _, b := range bad {
 		fmt.Fprintln(o.Out, SanitizeText(b))
@@ -409,7 +466,11 @@ func syncSteamworks(ctx context.Context, o JoinOptions, in backendInputs, missin
 	if err != nil {
 		return fail(err)
 	}
-	fmt.Fprintf(out, "Downloading %d mods with the Steam client (DayZ shows as running in Steam meanwhile)…\n", len(valid))
+	verb, done := "Downloading", "installed"
+	if o.Update {
+		verb, done = "Updating", "up to date"
+	}
+	fmt.Fprintf(out, "%s %d mods with the Steam client (DayZ shows as running in Steam meanwhile)…\n", verb, len(valid))
 	// A signal that came in before the job was registered found nothing for
 	// CancelAll to stop, so cancel here as well.
 	if ctx.Err() != nil {
@@ -433,7 +494,7 @@ func syncSteamworks(ctx context.Context, o JoinOptions, in backendInputs, missin
 				}
 			}
 		case steamworks.EventDone:
-			fmt.Fprintf(out, "  %s: installed\n", SanitizeText(it.name))
+			fmt.Fprintf(out, "  %s: %s\n", SanitizeText(it.name), done)
 			if ev.Folder != "" && !searchesFolder(o.Paths, ev.Folder) {
 				it.elsewhere = ev.Folder
 			}
