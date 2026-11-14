@@ -1,0 +1,8 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      # Progress lines written to the terminal; a failed write is not actionable.
+      exclude-functions:
+        - fmt.Fprintln
+        - fmt.Fprintf

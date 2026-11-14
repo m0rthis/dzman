@@ -24,4 +24,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          # Built from source with the job's Go, since a prebuilt binary refuses to
+          # lint a module whose go.mod targets a newer Go than it was built with.
+          install-mode: goinstall
+          version: v2.15.0

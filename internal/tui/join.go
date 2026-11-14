@@ -371,6 +371,7 @@ func stillMissing(o JoinOptions, mods []api.Mod) error {
 
 func syncSteamworks(ctx context.Context, o JoinOptions, in backendInputs, missing []api.Mod) error {
 	out := o.Out
+	//nolint:staticcheck // ST1005: Steamworks is a proper noun and the text is shown to the user
 	fail := func(err error) error { return fmt.Errorf("Steamworks: %w", err) }
 	if !launcher.IsSteamRunning() {
 		return fail(errors.New("the Steam client is not running; start Steam, log in, and try again"))
