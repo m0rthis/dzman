@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/braydencw1/dzman/internal/api"
-	"github.com/braydencw1/dzman/internal/config"
-	"github.com/braydencw1/dzman/internal/steam"
-	"github.com/braydencw1/dzman/internal/steamworks"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/m0rthis/dzman/internal/api"
+	"github.com/m0rthis/dzman/internal/config"
+	"github.com/m0rthis/dzman/internal/steam"
+	"github.com/m0rthis/dzman/internal/steamworks"
 )
 
 func TestResolveBackend(t *testing.T) {

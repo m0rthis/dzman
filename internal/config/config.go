@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/braydencw1/dzman/internal/version"
+	"github.com/m0rthis/dzman/internal/version"
 )
 
 const (

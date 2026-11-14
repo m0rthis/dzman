@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/braydencw1/dzman/internal/api"
+	"github.com/m0rthis/dzman/internal/api"
 )
 
 // filterKind identifies a server-list filter.

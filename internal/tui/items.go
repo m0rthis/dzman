@@ -3,9 +3,9 @@ package tui
 import (
 	"fmt"
 
-	"github.com/braydencw1/dzman/internal/api"
-	"github.com/braydencw1/dzman/internal/steam"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/m0rthis/dzman/internal/api"
+	"github.com/m0rthis/dzman/internal/steam"
 )
 
 // ---- serverItem — used in the server browser list ----

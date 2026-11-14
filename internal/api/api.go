@@ -18,7 +18,7 @@ const (
 	// GameID is the Steam app ID for DayZ.
 	GameID = "221100"
 	// Repo is the GitHub repository used for release update checks.
-	Repo = "braydencw1/dzman"
+	Repo = "m0rthis/dzman"
 
 	reqTimeout    = 10 * time.Second
 	serverTimeout = 30 * time.Second

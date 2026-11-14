@@ -11,10 +11,10 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/braydencw1/dzman/internal/api"
-	"github.com/braydencw1/dzman/internal/config"
-	"github.com/braydencw1/dzman/internal/steam"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/m0rthis/dzman/internal/api"
+	"github.com/m0rthis/dzman/internal/config"
+	"github.com/m0rthis/dzman/internal/steam"
 )
 
 func TestRejoinTarget(t *testing.T) {

@@ -1,4 +1,4 @@
-module github.com/braydencw1/dzman
+module github.com/m0rthis/dzman
 
 go 1.27.4
 

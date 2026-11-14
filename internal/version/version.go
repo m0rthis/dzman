@@ -2,10 +2,10 @@
 // are meant to be overridden at build time with -ldflags, e.g.:
 //
 //	go build -ldflags "\
-//	  -X github.com/braydencw1/dzman/internal/version.Version=v1.2.3 \
-//	  -X github.com/braydencw1/dzman/internal/version.Revision=abc1234 \
-//	  -X github.com/braydencw1/dzman/internal/version.Reference=refs/tags/v1.2.3 \
-//	  -X github.com/braydencw1/dzman/internal/version.BuiltAt=2026-07-09T12:00:00Z" \
+//	  -X github.com/m0rthis/dzman/internal/version.Version=v1.2.3 \
+//	  -X github.com/m0rthis/dzman/internal/version.Revision=abc1234 \
+//	  -X github.com/m0rthis/dzman/internal/version.Reference=refs/tags/v1.2.3 \
+//	  -X github.com/m0rthis/dzman/internal/version.BuiltAt=2026-07-09T12:00:00Z" \
 //	  ./cmd
 //
 // When not injected (plain `go build`/`go install`), Get falls back to the

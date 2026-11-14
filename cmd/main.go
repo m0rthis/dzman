@@ -7,13 +7,13 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/braydencw1/dzman/internal/config"
-	"github.com/braydencw1/dzman/internal/launcher"
-	"github.com/braydencw1/dzman/internal/steam"
-	"github.com/braydencw1/dzman/internal/steamworks"
-	"github.com/braydencw1/dzman/internal/tui"
-	"github.com/braydencw1/dzman/internal/version"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/m0rthis/dzman/internal/config"
+	"github.com/m0rthis/dzman/internal/launcher"
+	"github.com/m0rthis/dzman/internal/steam"
+	"github.com/m0rthis/dzman/internal/steamworks"
+	"github.com/m0rthis/dzman/internal/tui"
+	"github.com/m0rthis/dzman/internal/version"
 )
 
 func main() {

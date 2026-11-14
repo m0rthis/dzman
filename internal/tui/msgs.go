@@ -1,10 +1,10 @@
 package tui
 
 import (
-	"github.com/braydencw1/dzman/internal/a2s"
-	"github.com/braydencw1/dzman/internal/api"
-	"github.com/braydencw1/dzman/internal/steam"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/m0rthis/dzman/internal/a2s"
+	"github.com/m0rthis/dzman/internal/api"
+	"github.com/m0rthis/dzman/internal/steam"
 )
 
 // serversLoadedMsg carries the result of a server-list fetch.

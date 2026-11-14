@@ -9,15 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/braydencw1/dzman/internal/api"
-	"github.com/braydencw1/dzman/internal/config"
-	"github.com/braydencw1/dzman/internal/launcher"
-	"github.com/braydencw1/dzman/internal/procs"
-	"github.com/braydencw1/dzman/internal/steam"
-	"github.com/braydencw1/dzman/internal/steamworks"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/m0rthis/dzman/internal/api"
+	"github.com/m0rthis/dzman/internal/config"
+	"github.com/m0rthis/dzman/internal/launcher"
+	"github.com/m0rthis/dzman/internal/procs"
+	"github.com/m0rthis/dzman/internal/steam"
+	"github.com/m0rthis/dzman/internal/steamworks"
 )
 
 // ---- Backend selection -----------------------------------------------

@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/braydencw1/dzman/internal/procs"
+	"github.com/m0rthis/dzman/internal/procs"
 )
 
 // GameID is the Steam App ID for DayZ.

@@ -29,7 +29,7 @@ jobs:
           REFERENCE: ${{ github.ref }}
         run: |
           set -euo pipefail
-          PKG=github.com/braydencw1/dzman/internal/version
+          PKG=github.com/m0rthis/dzman/internal/version
           REV=$(git rev-parse --short=12 HEAD)
           BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           LDFLAGS="-s -w \

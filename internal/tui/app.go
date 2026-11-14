@@ -10,17 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/braydencw1/dzman/internal/a2s"
-	"github.com/braydencw1/dzman/internal/api"
-	"github.com/braydencw1/dzman/internal/config"
-	"github.com/braydencw1/dzman/internal/launcher"
-	"github.com/braydencw1/dzman/internal/steam"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/m0rthis/dzman/internal/a2s"
+	"github.com/m0rthis/dzman/internal/api"
+	"github.com/m0rthis/dzman/internal/config"
+	"github.com/m0rthis/dzman/internal/launcher"
+	"github.com/m0rthis/dzman/internal/steam"
 )
 
 // page represents the currently active UI screen.

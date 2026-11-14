@@ -43,11 +43,11 @@ with most external-tool dependencies replaced by native Go.
 ```bash
 go build -o dzman ./cmd
 # or install to $GOBIN
-go install github.com/braydencw1/dzman/cmd@latest
+go install github.com/m0rthis/dzman/cmd@latest
 ```
 
 Prebuilt Linux binaries (amd64/arm64) are attached to each
-[release](https://github.com/braydencw1/dzman/releases).
+[release](https://github.com/m0rthis/dzman/releases).
 
 ## Usage
 
