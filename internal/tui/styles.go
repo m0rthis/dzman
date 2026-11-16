@@ -91,11 +91,10 @@ func boolIcon(b bool) string {
 
 // timeEmoji returns ☀ for daytime hours, ☾ for night.
 func timeEmoji(t string) string {
-	if len(t) < 2 {
+	hour, ok := gameHour(t)
+	if !ok {
 		return "?"
 	}
-	var hour int
-	_, _ = fmt.Sscan(t[:2], &hour)
 	if hour >= 6 && hour <= 18 {
 		return "☀"
 	}

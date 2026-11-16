@@ -63,7 +63,8 @@ dzman help                 # show usage
 `connect` (the port is the game port) and `rejoin` do not open the TUI. They look
 the server up in the server list, install any missing mods through the
 configured [mod backend](#mods), record the join in the history, and launch
-DayZ. Progress is printed as plain lines, and if the mods cannot be installed
+DayZ. They print the server's map, player count, in-game time, version and mod
+count as the server list has them (up to `server_db_ttl` old). Progress is printed as plain lines, and if the mods cannot be installed
 (backend `manual`, SteamCMD not logged in, Steam not running) dzman says why and
 exits non-zero without launching. By default they only install missing mods; with
 `-u` (`--update`) they also update the server's installed mods first, like the

@@ -220,6 +220,40 @@ func lookupServer(ctx context.Context, out io.Writer, cfg *config.Config, t Join
 	return findServer(fresh.list.Result, t), nil
 }
 
+// serverSummary is the one-line status a terminal join prints under the
+// server's name: map, players, in-game time, perspective, version and mod
+// count, as the server list has them. Fields the list left empty are skipped.
+func serverSummary(srv *api.Server) string {
+	var parts []string
+	if m := SanitizeText(srv.Map); m != "" {
+		parts = append(parts, "map "+m)
+	}
+	if srv.MaxPlayers > 0 {
+		parts = append(parts, fmt.Sprintf("players %d/%d", srv.Players, srv.MaxPlayers))
+	}
+	if t := SanitizeText(srv.Time); t != "" {
+		when := "night"
+		if isDay(t) {
+			when = "day"
+		}
+		t = fmt.Sprintf("time %s (%s", t, when)
+		if srv.TimeAcceleration > 0 {
+			t += fmt.Sprintf(", x%g", srv.TimeAcceleration)
+		}
+		parts = append(parts, t+")")
+	}
+	if srv.FirstPersonOnly {
+		parts = append(parts, "first person only")
+	}
+	if v := SanitizeText(srv.Version); v != "" {
+		parts = append(parts, "version "+v)
+	}
+	if n := len(srv.Mods); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d mods", n))
+	}
+	return strings.Join(parts, " · ")
+}
+
 var errNotSetUp = errors.New("dzman is not set up (DayZ folder not found); run `dzman` once to finish setup")
 
 func join(ctx context.Context, stopSignals func(), o JoinOptions) error {
@@ -250,6 +284,9 @@ func join(ctx context.Context, stopSignals func(), o JoinOptions) error {
 		return launch(ctx, stopSignals, out, o.Profile.Player, args.ToSteamArgs(), nil)
 	}
 	fmt.Fprintf(out, "Server: %s (%s:%d)\n", SanitizeText(srv.Name), SanitizeText(srv.Endpoint.IP), srv.GamePort)
+	if info := serverSummary(srv); info != "" {
+		fmt.Fprintf(out, "        %s\n", info)
+	}
 	if srv.Password && o.Password == "" {
 		return fmt.Errorf("the server needs a password; set %s", PasswordEnv)
 	}

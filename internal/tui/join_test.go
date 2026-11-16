@@ -545,3 +545,34 @@ func TestSteamCMDUpdatable(t *testing.T) {
 		t.Errorf("steamCMDUpdatable = %v, want managed and missing", got)
 	}
 }
+
+func TestServerSummary(t *testing.T) {
+	full := &api.Server{
+		Map: "chernarus\x1b[2Jplus", Players: 23, MaxPlayers: 60, Time: "21:40", TimeAcceleration: 4,
+		FirstPersonOnly: true, Version: "1.28.1", Mods: []api.Mod{{}, {}},
+	}
+	want := "map chernarus[2Jplus · players 23/60 · time 21:40 (night, x4) · first person only · version 1.28.1 · 2 mods"
+	if got := serverSummary(full); got != want {
+		t.Errorf("full:\n got %q\nwant %q", got, want)
+	}
+	if got := serverSummary(&api.Server{Time: "09:05"}); got != "time 09:05 (day)" {
+		t.Errorf("time only: got %q", got)
+	}
+	if got := serverSummary(&api.Server{}); got != "" {
+		t.Errorf("empty: got %q", got)
+	}
+}
+
+func TestGameHour(t *testing.T) {
+	for in, want := range map[string]bool{"08:30": true, "09:05": true, "9:05": true, "18:59": true, "05:59": false, "19:00": false, "0:10": false, "": true} {
+		if got := isDay(in); got != want {
+			t.Errorf("isDay(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if got := timeEmoji("09:05"); got != "☀" {
+		t.Errorf("timeEmoji(09:05) = %q", got)
+	}
+	if got := timeEmoji(""); got != "?" {
+		t.Errorf("timeEmoji(\"\") = %q", got)
+	}
+}

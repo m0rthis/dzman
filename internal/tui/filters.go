@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/m0rthis/dzman/internal/api"
@@ -177,10 +177,15 @@ func allFilterOptions() []filterDef {
 
 // isDay returns true if the game time is between 06:00 and 18:00.
 func isDay(t string) bool {
-	if len(t) < 2 {
-		return true
-	}
-	var hour int
-	_, _ = fmt.Sscan(t[:2], &hour)
-	return hour >= 6 && hour <= 18
+	hour, ok := gameHour(t)
+	return !ok || (hour >= 6 && hour <= 18)
+}
+
+// gameHour is the hour of a game time such as "9:05" or "09:05". Atoi reads
+// it as decimal; Sscan took the leading zero of "08" and "09" for octal and
+// gave 0.
+func gameHour(t string) (int, bool) {
+	h, _, _ := strings.Cut(t, ":")
+	hour, err := strconv.Atoi(strings.TrimSpace(h))
+	return hour, err == nil
 }
