@@ -670,6 +670,9 @@ func TestBrowserFitsTerminal(t *testing.T) {
 			if got := lipgloss.Height(m.View()); got > 30 {
 				t.Errorf("%s at width %d after a resize: view is %d lines", name, w, got)
 			}
+			if w >= 120 && !strings.Contains(m.detail.View(), "Players") {
+				t.Errorf("%s at width %d: the detail pane is empty after a resize", name, w)
+			}
 		}
 	}
 }

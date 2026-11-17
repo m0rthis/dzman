@@ -1068,10 +1068,11 @@ func (m Model) browserListW() int {
 	return m.w
 }
 
-// sizeDetail sizes the detail pane for the split browser view.
+// sizeDetail sizes the detail pane for the split browser view and refills it.
 func (m *Model) sizeDetail() {
 	if m.w >= 120 {
 		m.detail = viewport.New(m.w-m.w/2-6, m.h-4)
+		m.refreshDetail() // a new viewport is empty; a resize must not blank the pane
 	}
 }
 
