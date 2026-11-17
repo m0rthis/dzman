@@ -1094,6 +1094,7 @@ func (m Model) buildFavoritesBrowser() (Model, tea.Cmd) {
 			if s.Endpoint.IP == fav.IP && s.Endpoint.Port == fav.Port {
 				fi.online = true
 				fi.idx = i
+				fi.info = serverSummary(s)
 				break
 			}
 		}
@@ -1101,7 +1102,7 @@ func (m Model) buildFavoritesBrowser() (Model, tea.Cmd) {
 	}
 	m.list = newList(items, "Favorites", m.w, m.h-4)
 	m.displaySrvs = nil
-	return m, nil
+	return m, m.selectHighlighted()
 }
 
 func (m Model) buildHistoryBrowser() (Model, tea.Cmd) {
@@ -1114,6 +1115,7 @@ func (m Model) buildHistoryBrowser() (Model, tea.Cmd) {
 			if s.Endpoint.IP == h.IP && s.Endpoint.Port == h.Port {
 				fi.online = true
 				fi.idx = j
+				fi.info = serverSummary(s)
 				break
 			}
 		}
@@ -1121,7 +1123,7 @@ func (m Model) buildHistoryBrowser() (Model, tea.Cmd) {
 	}
 	m.list = newList(items, "Recently Played", m.w, m.h-4)
 	m.displaySrvs = nil
-	return m, nil
+	return m, m.selectHighlighted()
 }
 
 func (m Model) keyBrowser(msg tea.KeyMsg) (Model, tea.Cmd) {
@@ -1146,12 +1148,22 @@ func (m Model) keyBrowser(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
-	newSel := m.browserSelected()
-	if newSel != nil && newSel != m.sel {
-		m.sel = newSel
-		return m, tea.Batch(cmd, m.onSelChanged())
+	if m.browserSelected() != m.sel {
+		return m, tea.Batch(cmd, m.selectHighlighted())
 	}
 	return m, cmd
+}
+
+// selectHighlighted makes the highlighted row the selected server, so the
+// detail pane and the f key follow the cursor. An offline row selects
+// nothing and clears the pane.
+func (m *Model) selectHighlighted() tea.Cmd {
+	m.sel = m.browserSelected()
+	if m.sel == nil {
+		m.detail.SetContent("")
+		return nil
+	}
+	return m.onSelChanged()
 }
 
 // browserSelected returns the api.Server for the currently highlighted item.
@@ -2478,6 +2490,11 @@ func (m Model) viewList() string {
 	help := helpStyle.Render("  ↑↓ navigate  enter select  esc back  q quit")
 	if m.pg == pageFilterMenu || m.pg == pageLaunchOpts {
 		help = helpStyle.Render("  ↑↓ navigate  space toggle  enter confirm  esc back")
+	}
+	if m.pg == pageServerAction && m.sel != nil {
+		if info := serverSummary(m.sel); info != "" {
+			return lipgloss.JoinVertical(lipgloss.Left, m.list.View(), dimStyle.Render("  "+truncate(info, max(m.w-4, 10))), help)
+		}
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.list.View(), help)
 }

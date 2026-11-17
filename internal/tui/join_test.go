@@ -576,3 +576,42 @@ func TestGameHour(t *testing.T) {
 		t.Errorf("timeEmoji(\"\") = %q", got)
 	}
 }
+
+// Recently Played rows and the Server Options page show the listed server's
+// status, and the selection follows the cursor onto offline rows.
+func TestHistoryShowsServerStatus(t *testing.T) {
+	p := &config.Profile{}
+	p.AddToHistory("Gone", "9.9.9.9", 2305, 10)
+	p.AddToHistory("Cool Server", "1.1.1.1", 2305, 10)
+	m := New(&config.Config{}, p, nil)
+	m.w, m.h = 100, 30
+	m.servers = []api.Server{{
+		Name: "Cool Server", Map: "sakhal", Players: 5, MaxPlayers: 60, Time: "09:10",
+		Endpoint: api.Endpoint{IP: "1.1.1.1", Port: 2305}, GamePort: 2302,
+	}}
+	m.sel = &api.Server{Name: "stale"}
+	m, _ = m.buildHistoryBrowser()
+	if m.sel != &m.servers[0] {
+		t.Fatalf("sel = %+v, want the highlighted server", m.sel)
+	}
+	desc := m.list.Items()[0].(historyItem).Description()
+	for _, want := range []string{"1.1.1.1:2305", "map sakhal", "players 5/60", "time 09:10 (day)"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("row description %q lacks %q", desc, want)
+		}
+	}
+	if d := m.list.Items()[1].(historyItem).Description(); strings.Contains(d, "·") {
+		t.Errorf("offline row has a status: %q", d)
+	}
+
+	m, _ = m.keyBrowser(tea.KeyMsg{Type: tea.KeyDown})
+	if m.sel != nil {
+		t.Errorf("sel on an offline row = %+v, want nil", m.sel)
+	}
+	m, _ = m.keyBrowser(tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = m.selectFromBrowser()
+	m.pg = pageServerAction
+	if v := m.View(); !strings.Contains(v, "players 5/60") {
+		t.Errorf("Server Options view lacks the status:\n%s", v)
+	}
+}

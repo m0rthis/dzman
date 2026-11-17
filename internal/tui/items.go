@@ -97,6 +97,8 @@ type favoriteItem struct {
 	port   int
 	online bool
 	idx    int // index in server slice (-1 = offline)
+	// info is the listed server's status line (serverSummary), "" when offline.
+	info string
 }
 
 func (f favoriteItem) FilterValue() string { return f.name + " " + f.ip }
@@ -108,6 +110,9 @@ func (f favoriteItem) Title() string {
 	return fmt.Sprintf("%-50s  %s", truncate(f.name, 50), status)
 }
 func (f favoriteItem) Description() string {
+	if f.info != "" {
+		return dimStyle.Render(fmt.Sprintf("  %s:%d · %s", f.ip, f.port, f.info))
+	}
 	return dimStyle.Render(fmt.Sprintf("  %s:%d", f.ip, f.port))
 }
 
