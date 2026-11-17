@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/m0rthis/dzman/internal/api"
 	"github.com/m0rthis/dzman/internal/config"
 	"github.com/m0rthis/dzman/internal/steam"
@@ -590,6 +591,7 @@ func TestHistoryShowsServerStatus(t *testing.T) {
 		Endpoint: api.Endpoint{IP: "1.1.1.1", Port: 2305}, GamePort: 2302,
 	}}
 	m.sel = &api.Server{Name: "stale"}
+	m.pg, m.bKind = pageBrowser, browserHistory // as picking Recently Played sets them
 	m, _ = m.buildHistoryBrowser()
 	if m.sel != &m.servers[0] {
 		t.Fatalf("sel = %+v, want the highlighted server", m.sel)
@@ -610,8 +612,95 @@ func TestHistoryShowsServerStatus(t *testing.T) {
 	}
 	m, _ = m.keyBrowser(tea.KeyMsg{Type: tea.KeyUp})
 	m, _ = m.selectFromBrowser()
-	m.pg = pageServerAction
 	if v := m.View(); !strings.Contains(v, "players 5/60") {
 		t.Errorf("Server Options view lacks the status:\n%s", v)
+	}
+
+	// Back from Server Options returns to the same list, not an empty one.
+	m, _ = m.keyServerAction(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.pg != pageBrowser || len(m.list.Items()) != 2 || m.list.Title != "Recently Played" {
+		t.Errorf("after back: page %v, %d items, title %q", m.pg, len(m.list.Items()), m.list.Title)
+	}
+}
+
+// browserFixture is a model with n listed servers that are all in the
+// history and the favorites.
+func browserFixture(w, h, n int) Model {
+	p := &config.Profile{}
+	var servers []api.Server
+	for i := range n {
+		s := api.Server{
+			Name: "A Fairly Long Server Name For Wrapping Number " + strings.Repeat("x", i), Map: "chernarusplus",
+			Players: 5, MaxPlayers: 60, Time: "09:10", TimeAcceleration: 4, Version: "1.28.160000",
+			FirstPersonOnly: true, Mods: make([]api.Mod, 23),
+			Endpoint: api.Endpoint{IP: "1.1.1.1", Port: 2305 + i}, GamePort: 2302 + i,
+		}
+		servers = append(servers, s)
+		p.AddToHistory(s.Name, s.Endpoint.IP, s.Endpoint.Port, 50)
+		p.AddFavorite(s.Name, s.Endpoint.IP, s.Endpoint.Port)
+	}
+	m := New(&config.Config{}, p, nil)
+	m.w, m.h = w, h
+	m.servers = servers
+	m.pg = pageBrowser
+	return m
+}
+
+// The browser never grows past the terminal, split view included: rows must
+// be cut to the list pane, not wrapped inside it.
+func TestBrowserFitsTerminal(t *testing.T) {
+	builds := map[string]func(Model) (Model, tea.Cmd){
+		"all": func(m Model) (Model, tea.Cmd) {
+			m.bKind, m.displaySrvs = browserAll, m.servers
+			return m.buildBrowser()
+		},
+		"favorites": func(m Model) (Model, tea.Cmd) { m.bKind = browserFavorites; return m.buildFavoritesBrowser() },
+		"history":   func(m Model) (Model, tea.Cmd) { m.bKind = browserHistory; return m.buildHistoryBrowser() },
+	}
+	for name, build := range builds {
+		for _, w := range []int{80, 119, 120, 121, 140, 200, 260} {
+			m, _ := build(browserFixture(w, 30, 12))
+			if got := lipgloss.Height(m.View()); got > 30 {
+				t.Errorf("%s at width %d: view is %d lines on a 30-line terminal", name, w, got)
+			}
+			if got := lipgloss.Width(m.View()); got > w {
+				t.Errorf("%s at width %d: view is %d columns wide", name, w, got)
+			}
+			m.resizeComponents()
+			if got := lipgloss.Height(m.View()); got > 30 {
+				t.Errorf("%s at width %d after a resize: view is %d lines", name, w, got)
+			}
+		}
+	}
+}
+
+// While a search is being typed every key goes to the search box, and the
+// selection follows the search results.
+func TestBrowserSearchKeysAndSelection(t *testing.T) {
+	p := &config.Profile{}
+	p.AddToHistory("Gone", "9.9.9.9", 2305, 10)
+	p.AddToHistory("Cool Server", "1.1.1.1", 2305, 10)
+	m := New(&config.Config{}, p, nil)
+	m.w, m.h = 100, 30
+	m.servers = []api.Server{{Name: "Cool Server", Endpoint: api.Endpoint{IP: "1.1.1.1", Port: 2305}}}
+	m.pg, m.bKind = pageBrowser, browserHistory
+	m, _ = m.buildHistoryBrowser()
+
+	m, _ = m.keyBrowser(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	for _, r := range "fq" {
+		m, _ = m.keyBrowser(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.pg != pageBrowser || len(p.Favorites) != 0 || m.list.FilterValue() != "fq" {
+		t.Fatalf("typing fq in the search: page %v, %d favorites, search %q", m.pg, len(p.Favorites), m.list.FilterValue())
+	}
+
+	// The search narrows to the offline row: nothing is selected any more.
+	m.list.SetFilterText("Gone")
+	m, _ = m.updateComponent(struct{}{})
+	if got := m.list.SelectedItem().(historyItem).name; got != "Gone" {
+		t.Fatalf("highlighted %q, want Gone", got)
+	}
+	if m.sel != nil {
+		t.Errorf("sel = %q with the offline row highlighted", m.sel.Name)
 	}
 }

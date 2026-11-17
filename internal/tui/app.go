@@ -634,10 +634,9 @@ func (m Model) updateComponent(msg tea.Msg) (Model, tea.Cmd) {
 	switch m.pg {
 	case pageBrowser:
 		m.list, cmd = m.list.Update(msg)
-		newSel := m.browserSelected()
-		if newSel != nil && newSel != m.sel {
-			m.sel = newSel
-			return m, tea.Batch(cmd, m.onSelChanged())
+		// Search results arrive here, not through keyBrowser.
+		if m.browserSelected() != m.sel {
+			return m, tea.Batch(cmd, m.selectHighlighted())
 		}
 		return m, cmd
 
@@ -1048,22 +1047,32 @@ func (m Model) buildBrowser() (Model, tea.Cmd) {
 		title = "Recently Played"
 	}
 
-	listW := m.w
-	if m.w >= 120 {
-		listW = m.w / 2
-	}
-	m.list = newList(items, title, listW, m.h-4)
-
-	vpW := m.w - listW - 4
-	if vpW > 10 {
-		m.detail = viewport.New(vpW, m.h-4)
-	}
+	m.list = newList(items, title, m.browserListW(), m.h-4)
+	m.sizeDetail()
 
 	if len(m.displaySrvs) > 0 {
 		m.sel = &m.displaySrvs[0]
 		return m, m.onSelChanged()
 	}
 	return m, nil
+}
+
+// browserListW is the width of a browser list: the whole window, or what
+// fits inside the left pane (half the window less its border and padding)
+// when viewBrowser shows the detail pane beside it. A wider list would wrap
+// its rows inside the pane and push the view past the terminal.
+func (m Model) browserListW() int {
+	if m.w >= 120 {
+		return m.w/2 - 4
+	}
+	return m.w
+}
+
+// sizeDetail sizes the detail pane for the split browser view.
+func (m *Model) sizeDetail() {
+	if m.w >= 120 {
+		m.detail = viewport.New(m.w-m.w/2-6, m.h-4)
+	}
 }
 
 // onSelChanged resets the detail pane for the newly selected server and
@@ -1100,7 +1109,8 @@ func (m Model) buildFavoritesBrowser() (Model, tea.Cmd) {
 		}
 		items = append(items, fi)
 	}
-	m.list = newList(items, "Favorites", m.w, m.h-4)
+	m.list = newList(items, "Favorites", m.browserListW(), m.h-4)
+	m.sizeDetail()
 	m.displaySrvs = nil
 	return m, m.selectHighlighted()
 }
@@ -1121,13 +1131,18 @@ func (m Model) buildHistoryBrowser() (Model, tea.Cmd) {
 		}
 		items[i] = historyItem{favoriteItem: fi, timeAgo: humanDuration(now.Sub(h.At))}
 	}
-	m.list = newList(items, "Recently Played", m.w, m.h-4)
+	m.list = newList(items, "Recently Played", m.browserListW(), m.h-4)
+	m.sizeDetail()
 	m.displaySrvs = nil
 	return m, m.selectHighlighted()
 }
 
 func (m Model) keyBrowser(msg tea.KeyMsg) (Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+	if m.list.FilterState() == list.Filtering && key != "ctrl+c" {
+		key = "" // typing a search: every key, esc and enter included, is the list's
+	}
+	switch key {
 	case "esc", "q":
 		m.pg = pageMain
 		return m.buildMainList()
@@ -1533,6 +1548,12 @@ func (m Model) handleServerActionSelect(label string) (Model, tea.Cmd) {
 func (m Model) goBackFromAction() (Model, tea.Cmd) {
 	m.pg = m.prevPage
 	if m.prevPage == pageBrowser {
+		switch m.bKind {
+		case browserFavorites:
+			return m.buildFavoritesBrowser()
+		case browserHistory:
+			return m.buildHistoryBrowser()
+		}
 		return m.buildBrowser()
 	}
 	return m.buildMainList()
@@ -2543,11 +2564,13 @@ func (m Model) viewError() string {
 // ---- Helpers ---------------------------------------------------------
 
 func (m *Model) resizeComponents() {
-	m.list.SetSize(m.w, m.h-6)
-	m.newsView = viewport.New(m.w-4, m.h-6)
-	if m.w >= 120 {
-		m.detail = viewport.New(m.w/2-4, m.h-4)
+	listW := m.w
+	if m.pg == pageBrowser {
+		listW = m.browserListW()
 	}
+	m.list.SetSize(listW, m.h-6)
+	m.newsView = viewport.New(m.w-4, m.h-6)
+	m.sizeDetail()
 }
 
 // newList creates a styled bubbles list with the given items and dimensions.
